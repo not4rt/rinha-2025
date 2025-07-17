@@ -112,7 +112,7 @@ fn main() {
 
     if db_init::DatabaseInitializer::initialize_if_needed(db_url) {
         println!("Database initialized successfully");
-    } 
+    }
 
     if mode_workers {
         println!("Starting health checker...");

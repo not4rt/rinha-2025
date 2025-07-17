@@ -5,41 +5,11 @@ impl DatabaseInitializer {
     pub fn initialize_if_needed(db_url: &str) -> bool {
         let client = may_postgres::connect(db_url).unwrap();
 
-        if Self::is_initialized(&client) {
-            println!("Database already initialized, skipping setup");
-            return false;
-        }
-
-        println!("Database not initialized, creating tables and indexes...");
         Self::create_schema(&client);
         Self::create_indexes(&client);
         Self::insert_initial_data(&client);
 
-        println!("Database initialization completed successfully");
         true
-    }
-
-    fn is_initialized(client: &Client) -> bool {
-        let query = "
-            SELECT EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_schema = 'public' 
-                AND table_name = 'payments'
-            ) AND EXISTS (
-                SELECT FROM information_schema.tables 
-                WHERE table_schema = 'public' 
-                AND table_name = 'health_checks'
-            );
-        ";
-
-        let mut rows = client.query_raw(query, &[]).unwrap();
-        let row = rows
-            .next()
-            .ok_or_else(|| println!("No rows returned from existence check"))
-            .unwrap()
-            .unwrap();
-
-        row.get(0)
     }
 
     fn create_schema(client: &Client) {
@@ -81,13 +51,13 @@ impl DatabaseInitializer {
 
     fn insert_initial_data(client: &Client) {
         let insert_default = "
-            INSERT INTO health_checks (processor) 
+            INSERT INTO health_checks (processor)
             VALUES ('default')
             ON CONFLICT (processor) DO NOTHING;
         ";
 
         let insert_fallback = "
-            INSERT INTO health_checks (processor) 
+            INSERT INTO health_checks (processor)
             VALUES ('fallback')
             ON CONFLICT (processor) DO NOTHING;
         ";
