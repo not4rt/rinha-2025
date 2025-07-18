@@ -83,29 +83,59 @@ jobs:
       run: |
         cd rinha-test
         echo "Running K6 tests..."
-        k6 run --summary-export=test-results.json rinha.js > k6-output.log 2>&1
+        k6 run -e MAX_REQUESTS=500 -e PARTICIPANT=github-action --summary-export=test-results.json rinha.js > k6-output.log 2>&1
         
-        # Extract p99 from test results
+        # Always show test output for debugging
+        cat k6-output.log
+        
+        # Extract metrics from test results
         if [ -f "test-results.json" ]; then
-          P99=$(jq -r '.metrics["http_req_duration{expected_response:true}"].values["p(99)"]' test-results.json)
-          echo "p99=$P99" >> $GITHUB_OUTPUT
-          echo "P99 duration: ${P99}ms"
+          P99=$(jq -r '.metrics["http_req_duration{expected_response:true}"]["p(99)"]' test-results.json)
+          TOTAL_AMOUNT=$(jq -r '.metrics["total_transactions_amount"]["count"]' test-results.json)
           
-          # Check if p99 meets performance criteria (< 1.5ms)
-          if (( $(echo "$P99 < 1.5" | bc -l) )); then
+          echo "p99=$P99" >> $GITHUB_OUTPUT
+          echo "total_amount=$TOTAL_AMOUNT" >> $GITHUB_OUTPUT
+          echo "P99 duration: ${P99}ms"
+          echo "Total transactions amount: ${TOTAL_AMOUNT}"
+          
+          # Check if both metrics are valid
+          P99_VALID=false
+          AMOUNT_VALID=false
+          
+          if [ -n "$P99" ] && [ "$P99" != "null" ] && [ "$P99" != "" ]; then
+            if (( $(echo "$P99 < 1.5" | bc -l) )); then
+              P99_VALID=true
+              echo "✅ P99 test PASSED - ${P99}ms < 1.5ms"
+            else
+              echo "❌ P99 test FAILED - ${P99}ms >= 1.5ms"
+            fi
+          else
+            echo "❌ Could not extract P99 value from test results"
+          fi
+          
+          if [ -n "$TOTAL_AMOUNT" ] && [ "$TOTAL_AMOUNT" != "null" ] && [ "$TOTAL_AMOUNT" != "" ]; then
+            if (( $(echo "$TOTAL_AMOUNT > 250000" | bc -l) )); then
+              AMOUNT_VALID=true
+              echo "✅ Transaction amount test PASSED - ${TOTAL_AMOUNT} > 250000"
+            else
+              echo "❌ Transaction amount test FAILED - ${TOTAL_AMOUNT} <= 250000"
+            fi
+          else
+            echo "❌ Could not extract total transaction amount from test results"
+          fi
+          
+          # Both criteria must pass
+          if [ "$P99_VALID" = true ] && [ "$AMOUNT_VALID" = true ]; then
             echo "performance_passed=true" >> $GITHUB_OUTPUT
-            echo "✅ Performance test PASSED - P99: ${P99}ms < 1.5ms"
+            echo "🎉 ALL PERFORMANCE TESTS PASSED!"
           else
             echo "performance_passed=false" >> $GITHUB_OUTPUT
-            echo "❌ Performance test FAILED - P99: ${P99}ms >= 1.5ms"
+            echo "❌ Performance tests FAILED - Both P99 < 1.5ms AND total amount > 250000 required"
           fi
         else
           echo "performance_passed=false" >> $GITHUB_OUTPUT
           echo "❌ Test results file not found"
         fi
-        
-        # Always show test output for debugging
-        cat k6-output.log
 
     - name: Stop services
       if: always()
@@ -138,9 +168,9 @@ jobs:
     - name: Performance test summary
       run: |
         echo "## Performance Test Results" >> $GITHUB_STEP_SUMMARY
-        echo "- **P99 Duration**: ${{ steps.k6_test.outputs.p99 }}ms" >> $GITHUB_STEP_SUMMARY
-        echo "- **Performance Threshold**: < 1.5ms" >> $GITHUB_STEP_SUMMARY
-        echo "- **Result**: ${{ steps.k6_test.outputs.performance_passed == 'true' && '✅ PASSED' || '❌ FAILED' }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **P99 Duration**: ${{ steps.k6_test.outputs.p99 }}ms (threshold: < 1.5ms)" >> $GITHUB_STEP_SUMMARY
+        echo "- **Total Transaction Amount**: ${{ steps.k6_test.outputs.total_amount }} (threshold: > 250000)" >> $GITHUB_STEP_SUMMARY
+        echo "- **Overall Result**: ${{ steps.k6_test.outputs.performance_passed == 'true' && '✅ PASSED' || '❌ FAILED' }}" >> $GITHUB_STEP_SUMMARY
         
         if [[ "${{ steps.k6_test.outputs.performance_passed }}" == "true" && "${{ github.ref }}" == "refs/heads/main" ]]; then
           echo "- **Docker Images**: Pushed to ${{ env.IMAGE_NAME }}:latest and ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
