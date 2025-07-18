@@ -118,9 +118,9 @@ fn main() {
     }
 
     if mode_workers {
-        println!("Starting health checker...");
-        let health_pool = db_pool::HealthDbPool::new(db_url, 1);
-        start_health_checker(&health_pool, default_processor_url, fallback_processor_url);
+        // println!("Starting health checker...");
+        // let health_pool = db_pool::HealthDbPool::new(db_url, 1);
+        // start_health_checker(&health_pool, default_processor_url, fallback_processor_url);
 
         println!("Starting workers...");
         let workers_number = num_cpus;
