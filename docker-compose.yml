@@ -28,7 +28,7 @@ services:
       resources:
         limits:
           memory: 25M
-          cpus: '0.2'
+          cpus: '0.1'
   
   backend1:
     build: .
@@ -53,7 +53,7 @@ services:
       resources:
         limits:
           memory: 60M
-          cpus: '0.2'
+          cpus: '0.1'
 
   backend2:
     build: .
@@ -78,7 +78,7 @@ services:
       resources:
         limits:
           memory: 60M
-          cpus: '0.2'
+          cpus: '0.1'
 
   worker:
     build: .
@@ -137,7 +137,7 @@ services:
       resources:
         limits:
           memory: 115M
-          cpus: '0.5'
+          cpus: '0.8'
 
 networks:
   backend:
