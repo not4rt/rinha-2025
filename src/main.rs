@@ -97,18 +97,21 @@ fn main() {
     may::config().set_pool_capacity(1000);
     let port = std::env::var("PORT").unwrap_or_else(|_| "9999".to_string());
     let db_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| {
-            "postgres://payments_user:payments_pass@localhost:5432/payments_db".to_string()
-        })
+        .unwrap()
         .leak();
     let default_processor_url = std::env::var("DEFAULT_PROCESSOR_URL")
-        .unwrap_or_else(|_| "http://localhost:8001".to_string())
+        .unwrap()
         .leak();
     let fallback_processor_url = std::env::var("FALLBACK_PROCESSOR_URL")
-        .unwrap_or_else(|_| "http://localhost:8002".to_string())
+        .unwrap()
         .leak();
-
-    dbg!(num_cpus::get());
+    let num_cpus = num_cpus::get();
+    
+    dbg!(&num_cpus);
+    dbg!(&db_url);
+    dbg!(&port);
+    dbg!(&default_processor_url);
+    dbg!(&fallback_processor_url);
 
     if db_init::DatabaseInitializer::initialize_if_needed(db_url) {
         println!("Database initialized successfully");
@@ -120,7 +123,7 @@ fn main() {
         start_health_checker(&health_pool, default_processor_url, fallback_processor_url);
 
         println!("Starting workers...");
-        let workers_number = num_cpus::get();
+        let workers_number = num_cpus;
         let worker_pool = db_pool::WorkerDbPool::new(db_url, workers_number);
         start_workers(
             &worker_pool,
@@ -133,7 +136,7 @@ fn main() {
     if mode_server {
         println!("Starting HTTP server on port {port}");
         let server = HttpServer {
-            db_pool: db_pool::ServerDbPool::new(db_url, num_cpus::get()),
+            db_pool: db_pool::ServerDbPool::new(db_url, num_cpus),
         };
         server
             .start(format!("0.0.0.0:{port}"))
