@@ -2,12 +2,13 @@ use may_minihttp::{HttpService, Request, Response};
 use rust_decimal::Decimal;
 use smallvec::SmallVec;
 use std::io::{self, BufRead};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
+use uuid::Uuid;
 
-use crate::db_pool::ServerDbClient;
+use crate::db_pool::ServerDbConnection;
 use crate::models::{PaymentRequest, PaymentSummary, ProcessorSummary};
 
-impl ServerDbClient {
+impl ServerDbConnection {
     pub fn queue_payment(&self, payment: &PaymentRequest) -> Result<(), may_postgres::Error> {
         let _ = self.client.query_raw(
             &self.statements.new_payment,
@@ -17,28 +18,33 @@ impl ServerDbClient {
         Ok(())
     }
 
-    pub fn show_payment_summary(
+    pub fn get_payment_summary(
         &self,
-        from: Option<&str>,
-        to: Option<&str>,
+        from: Option<i64>,
+        to: Option<i64>,
     ) -> Result<PaymentSummary, may_postgres::Error> {
-        let from_time = from.and_then(parse_date_to_systemtime);
-        let to_time = to.and_then(parse_date_to_systemtime);
+        let from_time = from.map(|ms| UNIX_EPOCH + std::time::Duration::from_millis(ms as u64));
+        let to_time = to.map(|ms| UNIX_EPOCH + std::time::Duration::from_millis(ms as u64));
 
-        let rows = self
-            .client
-            .query_raw(&self.statements.payments_summary, &[&from_time, &to_time])?;
+        let rows = if from_time.is_some() || to_time.is_some() {
+            self.client
+                .query_raw(&self.statements.payments_summary, &[&from_time, &to_time])?
+        } else {
+            self.client
+                .query_raw(&self.statements.payments_summary_no_dates, &[])?
+        };
 
         let mut default_summary = ProcessorSummary {
             total_requests: 0,
-            total_amount: Decimal::new(0, 1),
+            total_amount: Decimal::new(0, 2),
         };
         let mut fallback_summary = ProcessorSummary {
             total_requests: 0,
-            total_amount: Decimal::new(0, 1),
+            total_amount: Decimal::new(0, 2),
         };
 
-        let all_rows: SmallVec<[_; 8]> = rows.map(|r| r.unwrap()).collect();
+        let all_rows: SmallVec<[_; 2]> = rows.map(|r| r.unwrap()).collect();
+
         for row in all_rows {
             let processor: bool = row.get(0);
             let total_requests: i64 = row.get(1);
@@ -60,8 +66,7 @@ impl ServerDbClient {
     }
 
     pub fn purge_payments(&self) -> Result<(), may_postgres::Error> {
-        let _ = self
-            .client
+        self.client
             .query_raw(&self.statements.purge_payments, &[])?;
 
         Ok(())
@@ -69,7 +74,7 @@ impl ServerDbClient {
 }
 
 pub struct Service {
-    pub db: ServerDbClient,
+    pub db: ServerDbConnection,
 }
 
 impl HttpService for Service {
@@ -91,34 +96,47 @@ impl HttpService for Service {
 fn handle_payment(
     req: Request,
     rsp: &mut Response,
-    client: &ServerDbClient,
+    db: &ServerDbConnection,
 ) -> std::io::Result<()> {
-    let mut body = req.body();
-    let body_bytes = body.fill_buf()?;
+    let mut body_reader = req.body();
+    let body = body_reader.fill_buf()?;
+    let body_len = body.len();
 
-    let payment: PaymentRequest = if let Ok(p) = serde_json::from_slice(body_bytes) {
-        p
-    } else {
-        rsp.status_code(400, "Invalid JSON");
-        return Ok(());
+    let uuid = Uuid::try_parse_ascii(&body[18..54]).unwrap();
+
+    let amount_str = unsafe { std::str::from_utf8_unchecked(&body[65..body_len - 1]) };
+    let amount = Decimal::from_str_exact(amount_str).unwrap();
+
+    let payment: PaymentRequest = PaymentRequest {
+        correlation_id: uuid,
+        amount: amount,
     };
 
-    match client.queue_payment(&payment) {
-        Ok(()) => {}
+    match db.queue_payment(&payment) {
+        Ok(()) => {
+            rsp.status_code(202, "Accepted");
+        }
         Err(e) => {
-            dbg!(e);
+            eprintln!("Database error: {}", e);
+            rsp.status_code(500, "Internal Server Error");
         }
     }
 
     Ok(())
 }
 
-fn handle_summary(req: &Request, rsp: &mut Response, client: &ServerDbClient) {
-    let (to_param, from_param) = parse_date_params(req.path());
+fn handle_summary(req: &Request, rsp: &mut Response, db: &ServerDbConnection) {
+    let (from_param, to_param) = parse_date_params(req.path());
 
-    match client.show_payment_summary(from_param.as_deref(), to_param.as_deref()) {
+    match db.get_payment_summary(from_param, to_param) {
         Ok(summary) => {
-            let json = serde_json::to_string(&summary).unwrap();
+            let json = format!(
+                r#"{{"default":{{"totalRequests":{},"totalAmount":{}}},"fallback":{{"totalRequests":{},"totalAmount":{}}}}}"#,
+                summary.default.total_requests,
+                summary.default.total_amount,
+                summary.fallback.total_requests,
+                summary.fallback.total_amount
+            );
             rsp.header("Content-Type: application/json");
             rsp.body_vec(json.into_bytes());
         }
@@ -129,34 +147,41 @@ fn handle_summary(req: &Request, rsp: &mut Response, client: &ServerDbClient) {
     }
 }
 
-fn parse_date_params(path: &str) -> (Option<String>, Option<String>) {
-    path.find('?').map_or((None, None), |query_start| {
-        let query = &path[query_start + 1..];
-        let mut to_param = None;
-        let mut from_param = None;
-        for param in query.split('&') {
-            if let Some((key, value)) = param.split_once('=') {
-                match key {
-                    "to" => to_param = Some(value.to_string()),
-                    "from" => from_param = Some(value.to_string()),
-                    _ => {}
-                }
+#[inline]
+fn parse_date_params(path: &str) -> (Option<i64>, Option<i64>) {
+    let query_start = match path.find('?') {
+        Some(pos) => pos + 1,
+        None => return (None, None),
+    };
+
+    let query = &path[query_start..];
+    let mut from = None;
+    let mut to = None;
+
+    for param in query.split('&') {
+        if let Some(eq_pos) = param.find('=') {
+            let (key, value) = param.split_at(eq_pos);
+            let value = &value[1..];
+
+            match key {
+                "from" => from = parse_rfc3339_to_millis(value),
+                "to" => to = parse_rfc3339_to_millis(value),
+                _ => {}
             }
         }
-        (to_param, from_param)
-    })
+    }
+
+    (from, to)
 }
 
-fn parse_date_to_systemtime(date_str: &str) -> Option<SystemTime> {
-    let timestamp_millis = chrono::DateTime::parse_from_rfc3339(date_str)
-        .ok()?
-        .timestamp_millis();
-
-    let duration = std::time::Duration::from_millis(timestamp_millis as u64);
-    Some(UNIX_EPOCH + duration)
+#[inline]
+fn parse_rfc3339_to_millis(date_str: &str) -> Option<i64> {
+    chrono::DateTime::parse_from_rfc3339(date_str)
+        .ok()
+        .map(|dt| dt.timestamp_millis())
 }
 
-fn handle_purge(_req: Request, rsp: &mut Response, client: &ServerDbClient) {
+fn handle_purge(_req: Request, rsp: &mut Response, client: &ServerDbConnection) {
     match client.purge_payments() {
         Ok(()) => {
             rsp.status_code(200, "Ok");

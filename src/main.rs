@@ -8,11 +8,11 @@ use std::time::Duration;
 use may::go;
 use may_minihttp::HttpServiceFactory;
 
-use crate::worker::ProcessingError;
+use crate::{models::Processor, worker::ProcessingError};
 
 mod db_init;
 mod db_pool;
-mod health_check;
+// mod health_check;
 mod models;
 mod server;
 mod worker;
@@ -29,20 +29,26 @@ fn start_workers(
         let _ = go!(
             may::coroutine::Builder::new()
                 .name(format!("worker-{i}"))
-                .stack_size(0x4000),
+                .stack_size(0x9999),
             move || {
                 println!("Worker {i} started");
                 loop {
-                    let processors = worker.wait_healthy_check();
+                    // let processors = worker.wait_healthy_check();
+                    let processors = (Processor::Default, Some(Processor::Fallback));
                     match worker.process_batch(processors) {
-                        Ok(()) => {
-                            // may::coroutine::sleep(Duration::from_millis(100));
+                        Ok(0) => {
+                            // No pending payments
+                            may::coroutine::sleep(Duration::from_millis(100));
+                        }
+                        Ok(_) => {
+                            //
                         }
                         Err(ProcessingError::DatabaseError(error)) => {
-                            println!("worker db error: {error}");
+                            println!("Worker {i} database error: {error}");
                         }
                         Err(_) => {
-                            // Both Processors Unavailable or No Pending payments
+                            // Both Processors Unavailable
+                            eprintln!("Both processors unavailable");
                             may::coroutine::sleep(Duration::from_millis(500));
                         }
                     }
@@ -52,25 +58,25 @@ fn start_workers(
     }
 }
 
-fn start_health_checker(
-    pool: &db_pool::HealthDbPool,
-    default_url: &'static str,
-    fallback_url: &'static str,
-) {
-    let health_checker =
-        health_check::HealthChecker::new(pool.get_connection(0), default_url, fallback_url);
-    let _ = go!(
-        may::coroutine::Builder::new()
-            .name("health-checker-parent".to_owned())
-            .stack_size(0x4000),
-        move || {
-            loop {
-                health_checker.check_health();
-                may::coroutine::sleep(Duration::from_secs(5));
-            }
-        }
-    );
-}
+// fn start_health_checker(
+//     pool: &db_pool::HealthDbPool,
+//     default_url: &'static str,
+//     fallback_url: &'static str,
+// ) {
+//     let health_checker =
+//         health_check::HealthChecker::new(pool.get_connection(0), default_url, fallback_url);
+//     let _ = go!(
+//         may::coroutine::Builder::new()
+//             .name("health-checker-parent".to_owned())
+//             .stack_size(0x4000),
+//         move || {
+//             loop {
+//                 health_checker.check_health();
+//                 may::coroutine::sleep(Duration::from_secs(5));
+//             }
+//         }
+//     );
+// }
 
 struct HttpServer {
     db_pool: db_pool::ServerDbPool,
@@ -89,31 +95,27 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mode_server = args.contains(&"--server".to_string());
     let mode_workers = args.contains(&"--workers".to_string());
+
     if !mode_server && !mode_workers {
         println!("Specify at least 1 mode (--server or --workers)");
         std::process::exit(1);
     }
 
-    may::config().set_pool_capacity(1000);
+    may::config().set_pool_capacity(1000).set_stack_size(0x1000);
     let port = std::env::var("PORT").unwrap_or_else(|_| "9999".to_string());
-    let db_url = std::env::var("DATABASE_URL")
-        .unwrap()
-        .leak();
-    let default_processor_url = std::env::var("DEFAULT_PROCESSOR_URL")
-        .unwrap()
-        .leak();
-    let fallback_processor_url = std::env::var("FALLBACK_PROCESSOR_URL")
-        .unwrap()
-        .leak();
+    let db_url = std::env::var("DATABASE_URL").unwrap().leak();
+    let default_processor_url = std::env::var("DEFAULT_PROCESSOR_URL").unwrap().leak();
+    let fallback_processor_url = std::env::var("FALLBACK_PROCESSOR_URL").unwrap().leak();
     let num_cpus = num_cpus::get();
-    
-    dbg!(&num_cpus);
-    dbg!(&db_url);
-    dbg!(&port);
-    dbg!(&default_processor_url);
-    dbg!(&fallback_processor_url);
 
-    if db_init::DatabaseInitializer::initialize_if_needed(db_url) {
+    println!("Configuration:");
+    println!("  CPUs: {}", num_cpus);
+    println!("  Port: {}", port);
+    println!("  Database: {}", db_url);
+    println!("  Default Processor: {}", default_processor_url);
+    println!("  Fallback Processor: {}", fallback_processor_url);
+
+    if db_init::DatabaseInitializer::initialize(db_url) {
         println!("Database initialized successfully");
     }
 

@@ -2,11 +2,11 @@ use may_postgres::Client;
 pub struct DatabaseInitializer;
 
 impl DatabaseInitializer {
-    pub fn initialize_if_needed(db_url: &str) -> bool {
+    pub fn initialize(db_url: &str) -> bool {
         let client = may_postgres::connect(db_url).unwrap();
 
         Self::create_schema(&client);
-        Self::create_indexes(&client);
+        // Self::create_indexes(&client);
         Self::insert_initial_data(&client);
 
         true
@@ -37,17 +37,15 @@ impl DatabaseInitializer {
         client.query_raw(create_health_checks, &[]).unwrap();
     }
 
-    fn create_indexes(client: &Client) {
-        let indexes = [
-            "CREATE INDEX IF NOT EXISTS idx_payments_non_null_processor ON payments (processor, requested_at);",
-            "CREATE INDEX IF NOT EXISTS idx_last_check ON health_checks(last_check);",
-            "CREATE INDEX IF NOT EXISTS idx_failing_processor ON health_checks(failing, processor);",
-        ];
+    // fn create_indexes(client: &Client) {
+    //     let indexes = [
+    //         "CREATE INDEX IF NOT EXISTS idx_payments_non_null_processor ON payments (processor, requested_at);",
+    //     ];
 
-        for index_query in &indexes {
-            client.query_raw(*index_query, &[]).unwrap();
-        }
-    }
+    //     for index_query in &indexes {
+    //         client.query_raw(*index_query, &[]).unwrap();
+    //     }
+    // }
 
     fn insert_initial_data(client: &Client) {
         let insert_default = "

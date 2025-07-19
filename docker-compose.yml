@@ -28,8 +28,8 @@ services:
       resources:
         limits:
           memory: 25M
-          cpus: '0.2'
-  
+          cpus: "0.2"
+
   backend1:
     build: .
     environment:
@@ -53,7 +53,7 @@ services:
       resources:
         limits:
           memory: 60M
-          cpus: '0.2'
+          cpus: "0.2"
 
   backend2:
     build: .
@@ -78,7 +78,7 @@ services:
       resources:
         limits:
           memory: 60M
-          cpus: '0.2'
+          cpus: "0.2"
 
   worker:
     build: .
@@ -103,23 +103,10 @@ services:
       resources:
         limits:
           memory: 90M
-          cpus: '0.4'
-  
+          cpus: "0.4"
+
   postgres:
     image: postgres:17-alpine
-    command: >
-      postgres
-      -c checkpoint_completion_target=0.9
-      -c random_page_cost=1.1
-      -c effective_io_concurrency=200
-      -c logging_collector=off
-      -c log_statement=none
-      -c log_duration=off
-      -c log_connections=off
-      -c log_disconnections=off
-      -c fsync=off
-      -c synchronous_commit=off
-      -c full_page_writes=off
     environment:
       POSTGRES_USER: payments_user
       POSTGRES_PASSWORD: payments_pass
@@ -137,7 +124,7 @@ services:
       resources:
         limits:
           memory: 115M
-          cpus: '0.5'
+          cpus: "0.5"
 
 networks:
   backend:
