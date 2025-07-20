@@ -1,5 +1,3 @@
-// HTTP Server based on Xudong-Huang techpower benchmark submission
-
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -8,48 +6,41 @@ use std::time::Duration;
 use may::go;
 use may_minihttp::HttpServiceFactory;
 
-use crate::worker::ProcessingError;
-
-mod db_init;
-mod db_pool;
-// mod health_check;
 mod models;
+mod redis_pool;
 mod server;
 mod worker;
 
 fn start_workers(
-    pool: &db_pool::WorkerDbPool,
     num_workers: usize,
+    redis_url: &'static str,
     default_url: &'static str,
     fallback_url: &'static str,
 ) {
     for i in 0..num_workers {
-        let worker_db = pool.get_connection(i);
-        let worker = worker::Worker::new(worker_db, default_url, fallback_url);
         let _ = go!(
             may::coroutine::Builder::new()
                 .name(format!("worker-{i}"))
-                .stack_size(0x4000),
+                .stack_size(0x1000),
             move || {
                 println!("Worker {i} started");
+
+                let pool = redis_pool::RedisPool::new(redis_url, 1);
+                let mut worker = worker::Worker::new(pool, default_url, fallback_url);
+
                 loop {
-                    // let processors = worker.wait_healthy_check();
-                    // let processors = (Processor::Default, Some(Processor::Fallback));
                     match worker.process_batch() {
                         Ok(0) => {
-                            // No pending payments
                             may::coroutine::sleep(Duration::from_millis(50));
                         }
-                        Ok(_) => {
-                            //
+                        Ok(n) => {
+                            if n > 100 {
+                                eprintln!("Processed {n} payments");
+                            }
                         }
-                        Err(ProcessingError::DatabaseError(error)) => {
-                            println!("Worker {i} database error: {error}");
-                        }
-                        Err(_) => {
-                            // Both Processors Unavailable
-                            eprintln!("Both processors unavailable");
-                            may::coroutine::sleep(Duration::from_millis(50));
+                        Err(e) => {
+                            eprintln!("Worker {i} error: {e:?}");
+                            may::coroutine::sleep(Duration::from_millis(100));
                         }
                     }
                 }
@@ -58,36 +49,16 @@ fn start_workers(
     }
 }
 
-// fn start_health_checker(
-//     pool: &db_pool::HealthDbPool,
-//     default_url: &'static str,
-//     fallback_url: &'static str,
-// ) {
-//     let health_checker =
-//         health_check::HealthChecker::new(pool.get_connection(0), default_url, fallback_url);
-//     let _ = go!(
-//         may::coroutine::Builder::new()
-//             .name("health-checker-parent".to_owned())
-//             .stack_size(0x4000),
-//         move || {
-//             loop {
-//                 health_checker.check_health();
-//                 may::coroutine::sleep(Duration::from_secs(5));
-//             }
-//         }
-//     );
-// }
-
 struct HttpServer {
-    db_pool: db_pool::ServerDbPool,
+    redis_pool: redis_pool::RedisPool,
 }
 
 impl HttpServiceFactory for HttpServer {
-    type Service = server::Service;
+    type Service = server::Service<'static>;
 
     fn new_service(&self, id: usize) -> Self::Service {
-        let db = self.db_pool.get_connection(id);
-        server::Service { db }
+        let conn = self.redis_pool.get_connection(id);
+        server::Service { conn }
     }
 }
 
@@ -102,34 +73,27 @@ fn main() {
     }
 
     may::config().set_pool_capacity(1000).set_stack_size(0x1000);
-    let port = std::env::var("PORT").unwrap_or_else(|_| "9999".to_string());
-    let db_url = std::env::var("DATABASE_URL").unwrap().leak();
+
+    let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
+    let redis_url = std::env::var("REDIS_URL").unwrap().leak();
     let default_processor_url = std::env::var("DEFAULT_PROCESSOR_URL").unwrap().leak();
     let fallback_processor_url = std::env::var("FALLBACK_PROCESSOR_URL").unwrap().leak();
     let num_cpus = num_cpus::get();
 
     println!("Configuration:");
-    println!("  CPUs: {}", num_cpus);
-    println!("  Port: {}", port);
-    println!("  Database: {}", db_url);
-    println!("  Default Processor: {}", default_processor_url);
-    println!("  Fallback Processor: {}", fallback_processor_url);
+    println!("  CPUs: {num_cpus}");
+    println!("  Port: {port}");
+    println!("  Redis: {redis_url}");
+    println!("  Default Processor: {default_processor_url}");
+    println!("  Fallback Processor: {fallback_processor_url}");
 
-    if db_init::DatabaseInitializer::initialize(db_url) {
-        println!("Database initialized successfully");
-    }
+    redis_pool::init_scripts();
 
     if mode_workers {
-        // println!("Starting health checker...");
-        // let health_pool = db_pool::HealthDbPool::new(db_url, 1);
-        // start_health_checker(&health_pool, default_processor_url, fallback_processor_url);
-
         println!("Starting workers...");
-        let workers_number = num_cpus;
-        let worker_pool = db_pool::WorkerDbPool::new(db_url, workers_number);
         start_workers(
-            &worker_pool,
-            workers_number,
+            num_cpus,
+            redis_url,
             default_processor_url,
             fallback_processor_url,
         );
@@ -138,8 +102,9 @@ fn main() {
     if mode_server {
         println!("Starting HTTP server on port {port}");
         let server = HttpServer {
-            db_pool: db_pool::ServerDbPool::new(db_url, num_cpus),
+            redis_pool: redis_pool::RedisPool::new(redis_url, num_cpus),
         };
+
         server
             .start(format!("0.0.0.0:{port}"))
             .unwrap()

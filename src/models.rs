@@ -1,4 +1,5 @@
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 pub struct PaymentRequest<'a> {
@@ -18,37 +19,29 @@ pub struct PaymentSummary {
 }
 
 pub struct ProcessorSummary {
-    pub total_amount: Decimal,
     pub total_requests: i64,
+    pub total_amount: Decimal,
 }
 
-// pub struct ProcessorHealth {
-//     pub failing: bool,
-//     pub min_response_time: i32,
-// }
-
-#[derive(Clone, Copy, PartialEq)]
 pub enum Processor {
     Default,
     Fallback,
 }
 
-// pub const PROCESSOR_DEFAULT: &str = "default";
-// pub const PROCESSOR_FALLBACK: &str = "fallback";
-
 impl Processor {
-    // #[inline]
-    // pub fn as_str(self) -> &'static str {
-    //     match self {
-    //         Processor::Default => PROCESSOR_DEFAULT,
-    //         Processor::Fallback => PROCESSOR_FALLBACK,
-    //     }
-    // }
-    // #[inline]
-    // pub fn as_bool(self) -> bool {
-    //     match self {
-    //         Processor::Default => true,
-    //         Processor::Fallback => false,
-    //     }
-    // }
+    #[inline]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Processor::Default => "default",
+            Processor::Fallback => "fallback",
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct QueuedPayment<'a> {
+    pub id: &'a str,
+    pub correlation_id: Uuid,
+    pub amount: Decimal,
+    pub requested_at: i64, // milliseconds
 }

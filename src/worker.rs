@@ -1,35 +1,29 @@
-use std::time::{Duration, SystemTime};
-
 use chrono::{DateTime, Utc};
-use rust_decimal::Decimal;
+use std::time::Duration;
 use ureq::Agent;
-use uuid::Uuid;
 
-use crate::db_pool::WorkerDbConnection;
-use crate::models::{Processor, ProcessorPayment};
+use crate::models::{Processor, ProcessorPayment, QueuedPayment};
+use crate::redis_pool::{FETCH_BATCH_SCRIPT, PROCESS_PAYMENT_SCRIPT, RedisPool, format_time_key};
 
+const BATCH_SIZE: i64 = 2500;
 const MAX_LATENCY_THRESHOLD: u64 = 5000;
 
 #[derive(Debug)]
 pub enum ProcessingError {
-    DatabaseError(String),
+    RedisError(String),
     ProcessorUnavailable,
     BothProcessorsUnavailable,
 }
 
 pub struct Worker {
-    pub db: WorkerDbConnection,
-    pub default_url: &'static str,
-    pub fallback_url: &'static str,
-    pub agent: Agent,
+    pool: RedisPool,
+    default_url: &'static str,
+    fallback_url: &'static str,
+    agent: Agent,
 }
 
 impl Worker {
-    pub fn new(
-        db: WorkerDbConnection,
-        default_url: &'static str,
-        fallback_url: &'static str,
-    ) -> Self {
+    pub fn new(pool: RedisPool, default_url: &'static str, fallback_url: &'static str) -> Self {
         let agent = Agent::config_builder()
             .timeout_global(Some(Duration::from_millis(MAX_LATENCY_THRESHOLD)))
             .http_status_as_error(false)
@@ -37,110 +31,166 @@ impl Worker {
             .into();
 
         Self {
-            db,
+            pool,
             default_url,
             fallback_url,
             agent,
         }
     }
 
-    pub fn process_batch(
-        &self,
-        // processors: (Processor, Option<Processor>),
-    ) -> Result<usize, ProcessingError> {
-        // self.db.with_transaction(|transaction| {
-        let rows = self
-            .db
-            .get_payments_batch()
-            .map_err(|e| ProcessingError::DatabaseError(e.to_string()))?;
+    #[inline]
+    pub fn process_batch(&mut self) -> Result<usize, ProcessingError> {
+        let conn = self.pool.get_connection(0);
+
+        let now_ms = Utc::now().timestamp_millis();
+        let payments = conn.with_conn(|conn| {
+            FETCH_BATCH_SCRIPT
+                .key("payments:queue")
+                .arg(BATCH_SIZE)
+                .arg(now_ms)
+                .invoke::<Vec<String>>(conn)
+                .map_err(|e| ProcessingError::RedisError(e.to_string()))
+        })?;
+
+        if payments.is_empty() {
+            return Ok(0);
+        }
 
         let mut successful_payments = 0;
+        let mut failed_payments = Vec::new();
 
-        for row in rows {
-            let row = row.unwrap();
-            let id: i64 = row.get(0);
-            let correlation_id: &Uuid = &row.get(1);
-            let amount: &Decimal = &row.get(2);
-            let requested_at: SystemTime = row.get(3);
-            let requested_at_dt: DateTime<Utc> = requested_at.into();
+        for (index, payment_json) in payments.iter().enumerate() {
+            let queued_payment: QueuedPayment = serde_json::from_str(payment_json)
+                .map_err(|e| ProcessingError::RedisError(e.to_string()))?;
 
-            let payment = ProcessorPayment {
-                correlation_id,
-                amount,
-                requested_at: &requested_at_dt.to_rfc3339(),
+            let requested_at = DateTime::<Utc>::from_timestamp_millis(queued_payment.requested_at)
+                .unwrap_or_else(Utc::now);
+
+            let processor_payment = ProcessorPayment {
+                correlation_id: &queued_payment.correlation_id,
+                amount: &queued_payment.amount,
+                requested_at: &requested_at.to_rfc3339(),
             };
 
-            match self.send_and_update_payment(&payment, id) {
-                Ok(_) => successful_payments += 1,
+            match self.send_payment_with_fallback(&processor_payment) {
+                Ok(processor) => {
+                    conn.with_conn(|conn| {
+                        self.update_aggregates(conn, &queued_payment, processor)
+                    })?;
+                    successful_payments += 1;
+                }
                 Err(_) => {
+                    failed_payments
+                        .push((payment_json.clone(), queued_payment.requested_at + 5000));
+
+                    for remaining_json in &payments[index + 1..] {
+                        if let Ok(remaining_payment) =
+                            serde_json::from_str::<QueuedPayment>(remaining_json)
+                        {
+                            failed_payments.push((
+                                remaining_json.clone(),
+                                remaining_payment.requested_at + 5000,
+                            ));
+                        }
+                    }
+
+                    if !failed_payments.is_empty() {
+                        conn.with_conn(|conn| {
+                            let mut pipeline = redis::Pipeline::new();
+                            for (payment_data, score) in &failed_payments {
+                                pipeline.zadd("payments:queue", payment_data, score);
+                            }
+                            let _: () = pipeline
+                                .query(conn)
+                                .map_err(|e| ProcessingError::RedisError(e.to_string()))?;
+                            Ok::<(), ProcessingError>(())
+                        })?;
+                    }
+
                     return Err(ProcessingError::BothProcessorsUnavailable);
                 }
             }
         }
 
         Ok(successful_payments)
-        // })
     }
 
     #[inline]
-    fn send_and_update_payment(
+    fn send_payment_with_fallback(
         &self,
-        // processors: (Processor, Option<Processor>),
         payment: &ProcessorPayment,
-        id: i64,
     ) -> Result<Processor, ProcessingError> {
-        if let Ok(()) = self.send_payment(self.default_url, payment) {
-            self.db
-                .update_payment_default(id)
-                .map_err(|e| ProcessingError::DatabaseError(e.to_string()))?;
+        let buffer = build_json(payment);
+
+        if self.send_payment(self.default_url, &buffer).is_ok() {
             return Ok(Processor::Default);
         }
 
-        if let Ok(()) = self.send_payment(self.fallback_url, payment) {
-            self.db
-                .update_payment_fallback(id)
-                .map_err(|e| ProcessingError::DatabaseError(e.to_string()))?;
+        if self.send_payment(self.fallback_url, &buffer).is_ok() {
             return Ok(Processor::Fallback);
         }
 
         Err(ProcessingError::BothProcessorsUnavailable)
     }
 
-    #[inline(always)]
-    fn send_payment(&self, url: &str, payment: &ProcessorPayment) -> Result<(), ProcessingError> {
-        let body = [
-            r#"{"correlationId":""#,
-            &payment.correlation_id.to_string(),
-            r#"","amount":"#,
-            &payment.amount.to_string(),
-            r#","requestedAt":""#,
-            payment.requested_at,
-            r#""}"#,
-        ]
-        .concat();
-
+    #[inline]
+    fn send_payment(&self, url: &str, buffer: &str) -> Result<(), ProcessingError> {
         match self
             .agent
             .post(&format!("{url}/payments"))
             .header("Content-Type", "application/json")
-            .send(body)
+            .send(buffer)
         {
             Ok(resp) if resp.status().is_success() => Ok(()),
             Ok(resp) if resp.status().as_u16() == 422 => {
-                println!("Payment already processed!");
+                eprintln!("Payment already processed: url={url} buffer={buffer}");
                 Ok(())
             }
-            Ok(_) => {
-                // eprintln!(
-                //     "Processor {processor} returned error: {}",
-                //     resp.status().as_str()
-                // );
-                Err(ProcessingError::ProcessorUnavailable)
-            }
+            Ok(_) => Err(ProcessingError::ProcessorUnavailable),
             Err(e) => {
-                eprintln!("Agent error: {}", e);
+                eprintln!("Agent error: {e}");
                 Err(ProcessingError::ProcessorUnavailable)
             }
         }
     }
+
+    #[inline]
+    fn update_aggregates(
+        &self,
+        conn: &mut redis::Connection,
+        payment: &QueuedPayment,
+        processor: Processor,
+    ) -> Result<(), ProcessingError> {
+        let timestamp_ms = payment.requested_at;
+        let category = processor.as_str();
+        let amount = payment.amount.to_string();
+
+        let ms_key = format_time_key(timestamp_ms, category, "ms");
+        let sec_key = format_time_key(timestamp_ms / 1000, category, "s");
+        let min_key = format_time_key(timestamp_ms / 60000, category, "m");
+        let hour_key = format_time_key(timestamp_ms / 3600000, category, "h");
+
+        let _: () = PROCESS_PAYMENT_SCRIPT
+            .key(&ms_key)
+            .key(&sec_key)
+            .key(&min_key)
+            .key(&hour_key)
+            .arg(&amount)
+            .invoke(conn)
+            .map_err(|e| ProcessingError::RedisError(e.to_string()))?;
+
+        Ok(())
+    }
+}
+
+fn build_json(payment: &ProcessorPayment) -> String {
+    let mut buffer = String::with_capacity(256);
+    buffer.push_str("{\"correlationId\":\"");
+    buffer.push_str(&payment.correlation_id.to_string());
+    buffer.push_str("\",\"amount\":");
+    buffer.push_str(&payment.amount.to_string());
+    buffer.push_str(",\"requestedAt\":\"");
+    buffer.push_str(payment.requested_at);
+    buffer.push_str("\"}");
+    buffer
 }
