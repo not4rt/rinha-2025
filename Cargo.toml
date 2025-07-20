@@ -17,9 +17,10 @@ may_postgres = { git = "https://github.com/Xudong-Huang/may_postgres.git", rev =
     "with-uuid-1",
 ] }
 uuid = { version = "1.17.0" }
-rust_decimal = { version = "1.37.2", features = ["db-postgres"] }
+rust_decimal = { version = "1.37.2", features = ["db-postgres", "rkyv"] }
 chrono = "0.4.41"
 ureq = "3.0.12"
+rkyv = { version = "0.8", features = ["uuid-1"] }
 
 [profile.release]
 opt-level = 3

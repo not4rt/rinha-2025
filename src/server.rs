@@ -102,14 +102,14 @@ fn handle_payment(
     let body = body_reader.fill_buf()?;
     let body_len = body.len();
 
-    let uuid = Uuid::try_parse_ascii(&body[18..54]).unwrap();
+    let uuid: &Uuid = unsafe { rkyv::access_unchecked::<Uuid>(&body[18..54]) };
 
     let amount_str = unsafe { std::str::from_utf8_unchecked(&body[65..body_len - 1]) };
     let amount = Decimal::from_str_exact(amount_str).unwrap();
 
-    let payment: PaymentRequest = PaymentRequest {
+    let payment = PaymentRequest {
         correlation_id: uuid,
-        amount: amount,
+        amount: &amount,
     };
 
     match db.queue_payment(&payment) {

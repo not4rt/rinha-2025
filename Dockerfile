@@ -4,13 +4,13 @@ WORKDIR /app
 # Build dependencies
 COPY Cargo.toml Cargo.lock ./
 RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN RUSTFLAGS="-C target-cpu=skylake" cargo build --release
+RUN RUSTFLAGS="-C target-cpu=skylake -C link-arg=-fuse-ld=lld -Z share-generics=y" cargo +nightly build --release
 RUN rm -rf src
 
 # Build application
 COPY src ./src
 RUN touch src/main.rs
-RUN RUSTFLAGS="-C target-cpu=skylake" cargo build --release
+RUN RUSTFLAGS="-C target-cpu=skylake -C link-arg=-fuse-ld=lld -Z share-generics=y" cargo +nightly build --release
 
 FROM debian:bookworm-slim
 WORKDIR /app

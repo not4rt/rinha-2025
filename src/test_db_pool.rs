@@ -100,6 +100,8 @@ pub struct WorkerStatements {
     pub get_queue_batch: Statement,
     pub update_payment_default: Statement,
     pub update_payment_fallback: Statement,
+    pub update_payment_processed: Statement,
+    pub update_payment_not_processed: Statement,
     // pub select_processor: Statement,
 }
 
@@ -129,6 +131,20 @@ impl DatabaseStatements for WorkerStatements {
             )
             .unwrap();
 
+        let update_payment_processed = client
+            .prepare_typed(
+                "UPDATE payments SET processed = true WHERE id = $1",
+                &[Type::INT8],
+            )
+            .unwrap();
+
+        let update_payment_not_processed = client
+            .prepare_typed(
+                "UPDATE payments SET processed = false WHERE id = $1",
+                &[Type::INT8],
+            )
+            .unwrap();
+
         // let select_processor = client
         //     .prepare(
         //         "SELECT processor, response_time_ms
@@ -142,6 +158,8 @@ impl DatabaseStatements for WorkerStatements {
             get_queue_batch,
             update_payment_default,
             update_payment_fallback,
+            update_payment_processed,
+            update_payment_not_processed,
             // select_processor,
         }
     }
@@ -201,6 +219,22 @@ impl WorkerDbConnection {
     pub fn update_payment_fallback(&self, payment_id: i64) -> Result<(), may_postgres::Error> {
         self.client
             .execute(&self.statements.update_payment_fallback, &[&payment_id])?;
+        Ok(())
+    }
+
+    #[inline]
+    pub fn update_payment_processed(&self, payment_id: i64) -> Result<(), may_postgres::Error> {
+        self.client
+            .execute(&self.statements.update_payment_processed, &[&payment_id])?;
+        Ok(())
+    }
+
+    #[inline]
+    pub fn update_payment_not_processed(&self, payment_id: i64) -> Result<(), may_postgres::Error> {
+        self.client.execute(
+            &self.statements.update_payment_not_processed,
+            &[&payment_id],
+        )?;
         Ok(())
     }
 

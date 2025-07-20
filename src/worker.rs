@@ -45,24 +45,22 @@ impl Worker {
     }
 
     pub fn process_batch(
-        &mut self,
-        processors: (Processor, Option<Processor>),
+        &self,
+        // processors: (Processor, Option<Processor>),
     ) -> Result<usize, ProcessingError> {
+        // self.db.with_transaction(|transaction| {
         let rows = self
             .db
             .get_payments_batch()
             .map_err(|e| ProcessingError::DatabaseError(e.to_string()))?;
 
-        if rows.is_empty() {
-            return Ok(0);
-        }
-
         let mut successful_payments = 0;
 
-        for row in &rows {
+        for row in rows {
+            let row = row.unwrap();
             let id: i64 = row.get(0);
-            let correlation_id: Uuid = row.get(1);
-            let amount: Decimal = row.get(2);
+            let correlation_id: &Uuid = &row.get(1);
+            let amount: &Decimal = &row.get(2);
             let requested_at: SystemTime = row.get(3);
             let requested_at_dt: DateTime<Utc> = requested_at.into();
 
@@ -72,62 +70,54 @@ impl Worker {
                 requested_at: &requested_at_dt.to_rfc3339(),
             };
 
-            match self.send_and_update_payment(processors, &payment, id) {
+            match self.send_and_update_payment(&payment, id) {
                 Ok(_) => successful_payments += 1,
                 Err(_) => {
-                    break;
+                    return Err(ProcessingError::BothProcessorsUnavailable);
                 }
             }
         }
 
-        if successful_payments == 0 {
-            return Err(ProcessingError::BothProcessorsUnavailable);
-        }
-
         Ok(successful_payments)
+        // })
     }
 
     #[inline]
     fn send_and_update_payment(
         &self,
-        processors: (Processor, Option<Processor>),
+        // processors: (Processor, Option<Processor>),
         payment: &ProcessorPayment,
         id: i64,
     ) -> Result<Processor, ProcessingError> {
-        if let Ok(()) = self.send_payment(processors.0, payment) {
+        if let Ok(()) = self.send_payment(self.default_url, payment) {
             self.db
-                .update_payment(processors.0.as_bool(), id)
+                .update_payment_default(id)
                 .map_err(|e| ProcessingError::DatabaseError(e.to_string()))?;
-            return Ok(processors.0);
+            return Ok(Processor::Default);
         }
 
-        if let Some(fallback) = processors.1 {
-            if let Ok(()) = self.send_payment(fallback, payment) {
-                self.db
-                    .update_payment(fallback.as_bool(), id)
-                    .map_err(|e| ProcessingError::DatabaseError(e.to_string()))?;
-                return Ok(fallback);
-            }
+        if let Ok(()) = self.send_payment(self.fallback_url, payment) {
+            self.db
+                .update_payment_fallback(id)
+                .map_err(|e| ProcessingError::DatabaseError(e.to_string()))?;
+            return Ok(Processor::Fallback);
         }
 
         Err(ProcessingError::BothProcessorsUnavailable)
     }
 
-    #[inline]
-    fn send_payment(
-        &self,
-        processor: Processor,
-        payment: &ProcessorPayment,
-    ) -> Result<(), ProcessingError> {
-        let url = match processor {
-            Processor::Default => self.default_url,
-            Processor::Fallback => self.fallback_url,
-        };
-
-        let body = format!(
-            r#"{{"correlationId": "{}", "amount": {}, "requestedAt": "{}"}}"#,
-            payment.correlation_id, payment.amount, payment.requested_at
-        );
+    #[inline(always)]
+    fn send_payment(&self, url: &str, payment: &ProcessorPayment) -> Result<(), ProcessingError> {
+        let body = [
+            r#"{"correlationId":""#,
+            &payment.correlation_id.to_string(),
+            r#"","amount":"#,
+            &payment.amount.to_string(),
+            r#","requestedAt":""#,
+            payment.requested_at,
+            r#""}"#,
+        ]
+        .concat();
 
         match self
             .agent

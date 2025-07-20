@@ -1,14 +1,14 @@
 use rust_decimal::Decimal;
 use uuid::Uuid;
 
-pub struct PaymentRequest {
-    pub correlation_id: Uuid,
-    pub amount: Decimal,
+pub struct PaymentRequest<'a> {
+    pub correlation_id: &'a Uuid,
+    pub amount: &'a Decimal,
 }
 
 pub struct ProcessorPayment<'a> {
-    pub correlation_id: Uuid,
-    pub amount: Decimal,
+    pub correlation_id: &'a Uuid,
+    pub amount: &'a Decimal,
     pub requested_at: &'a str,
 }
 
@@ -44,11 +44,11 @@ impl Processor {
     //         Processor::Fallback => PROCESSOR_FALLBACK,
     //     }
     // }
-    #[inline]
-    pub fn as_bool(self) -> bool {
-        match self {
-            Processor::Default => true,
-            Processor::Fallback => false,
-        }
-    }
+    // #[inline]
+    // pub fn as_bool(self) -> bool {
+    //     match self {
+    //         Processor::Default => true,
+    //         Processor::Fallback => false,
+    //     }
+    // }
 }

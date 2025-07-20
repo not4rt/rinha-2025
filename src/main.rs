@@ -8,7 +8,7 @@ use std::time::Duration;
 use may::go;
 use may_minihttp::HttpServiceFactory;
 
-use crate::{models::Processor, worker::ProcessingError};
+use crate::worker::ProcessingError;
 
 mod db_init;
 mod db_pool;
@@ -25,20 +25,20 @@ fn start_workers(
 ) {
     for i in 0..num_workers {
         let worker_db = pool.get_connection(i);
-        let mut worker = worker::Worker::new(worker_db, default_url, fallback_url);
+        let worker = worker::Worker::new(worker_db, default_url, fallback_url);
         let _ = go!(
             may::coroutine::Builder::new()
                 .name(format!("worker-{i}"))
-                .stack_size(0x9999),
+                .stack_size(0x4000),
             move || {
                 println!("Worker {i} started");
                 loop {
                     // let processors = worker.wait_healthy_check();
-                    let processors = (Processor::Default, Some(Processor::Fallback));
-                    match worker.process_batch(processors) {
+                    // let processors = (Processor::Default, Some(Processor::Fallback));
+                    match worker.process_batch() {
                         Ok(0) => {
                             // No pending payments
-                            may::coroutine::sleep(Duration::from_millis(100));
+                            may::coroutine::sleep(Duration::from_millis(50));
                         }
                         Ok(_) => {
                             //
@@ -49,7 +49,7 @@ fn start_workers(
                         Err(_) => {
                             // Both Processors Unavailable
                             eprintln!("Both processors unavailable");
-                            may::coroutine::sleep(Duration::from_millis(500));
+                            may::coroutine::sleep(Duration::from_millis(50));
                         }
                     }
                 }
