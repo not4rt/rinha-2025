@@ -10,11 +10,12 @@ use crate::redis_pool::{
     AGGREGATE_SCRIPT, QUEUE_PAYMENT_SCRIPT, RedisConnection, select_granularity,
 };
 
+#[derive(Clone)]
 pub struct Service<'a> {
     pub conn: RedisConnection<'a>,
 }
 
-impl<'a> HttpService for Service<'a> {
+impl HttpService for Service<'static> {
     fn call(&mut self, req: Request, rsp: &mut Response) -> io::Result<()> {
         match req.path() {
             "/payments" => self.handle_payment(req, rsp)?,
@@ -30,32 +31,35 @@ impl<'a> HttpService for Service<'a> {
     }
 }
 
-impl<'a> Service<'a> {
+impl Service<'static> {
     #[inline]
     fn handle_payment(&mut self, req: Request, rsp: &mut Response) -> io::Result<()> {
         let mut body_reader = req.body();
         let body = body_reader.fill_buf()?;
         let body_len = body.len();
 
-        let uuid = unsafe { Uuid::try_parse_ascii(&body[18..54]).unwrap_unchecked() };
+        let correlation_id = unsafe { Uuid::try_parse_ascii(&body[18..54]).unwrap_unchecked() };
 
         let amount_str = unsafe { std::str::from_utf8_unchecked(&body[65..body_len - 1]) };
         let amount = unsafe { Decimal::from_str_exact(amount_str).unwrap_unchecked() };
 
         let payment = PaymentRequest {
-            correlation_id: &uuid,
-            amount: &amount,
+            correlation_id,
+            amount,
         };
 
-        match self.queue_payment(&payment) {
-            Ok(_) => {
-                rsp.status_code(202, "Accepted");
-            }
-            Err(e) => {
-                eprintln!("Redis error: {e}");
-                rsp.status_code(500, "Internal Server Error");
-            }
-        }
+        let clone = self.clone();
+        may::go!(move || { clone.queue_payment(&payment) });
+
+        // match self.queue_payment(&payment) {
+        //     Ok(_) => {
+        //         rsp.status_code(202, "Accepted");
+        //     }
+        //     Err(e) => {
+        //         eprintln!("Redis error: {e}");
+        //         rsp.status_code(500, "Internal Server Error");
+        //     }
+        // }
 
         Ok(())
     }
@@ -98,8 +102,8 @@ impl<'a> Service<'a> {
 
             let queued = QueuedPayment {
                 id: &Uuid::new_v4().to_string(),
-                correlation_id: *payment.correlation_id,
-                amount: *payment.amount,
+                correlation_id: payment.correlation_id,
+                amount: payment.amount,
                 requested_at: timestamp_ms,
             };
 

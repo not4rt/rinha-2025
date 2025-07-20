@@ -74,6 +74,7 @@ services:
       sh -c "
       ./rust_coroutines_rinha_2025
       --server
+      --workers
       "
     deploy:
       resources:

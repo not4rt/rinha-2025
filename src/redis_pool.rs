@@ -176,6 +176,7 @@ impl RedisPool {
     }
 }
 
+#[derive(Clone)]
 pub struct RedisConnection<'a> {
     mutex: &'a Mutex<Connection>,
 }
