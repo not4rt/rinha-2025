@@ -1,11 +1,11 @@
 use rust_decimal::Decimal;
 // use serde::{Deserialize, Serialize};
-use uuid::Uuid;
+// use uuid::Uuid;
 
-pub struct PaymentRequest {
-    pub correlation_id: Uuid,
-    pub amount: Decimal,
-}
+// pub struct PaymentRequest {
+//     pub correlation_id: Uuid,
+//     pub amount: Decimal,
+// }
 
 // #[derive(Serialize, Deserialize)]
 // pub struct ProcessorPayment<'a> {
@@ -40,13 +40,3 @@ impl Processor {
         }
     }
 }
-
-// #[derive(Serialize, Deserialize)]
-// pub struct QueuedPayment<'a> {
-//     pub id: &'a str,
-//     #[serde(rename = "correlationId")]
-//     pub correlation_id: Uuid,
-//     pub amount: Decimal,
-//     #[serde(rename = "requestedAt")]
-//     pub requested_at: i64, // milliseconds
-// }

@@ -101,10 +101,16 @@ fn main() {
 
     if mode_server {
         println!("Starting HTTP server on port {port}");
-        let server = HttpServer {
-            redis_pool: redis_pool::RedisPool::new(redis_url, num_cpus),
-        };
 
+        // mpsc worker
+        let redis_pool = redis_pool::RedisPool::new(redis_url, num_cpus);
+        let worker_conn = redis_pool.get_connection(0);
+        server::Service::start_redis_worker(worker_conn);
+        println!("started redis worker");
+
+        let server = HttpServer { redis_pool };
+
+        println!("starting server");
         server
             .start(format!("0.0.0.0:{port}"))
             .unwrap()

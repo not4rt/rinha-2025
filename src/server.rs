@@ -1,14 +1,29 @@
 use chrono::{DateTime, Utc};
+use may::select;
+use may::sync::mpsc;
 use may_minihttp::{HttpService, Request, Response};
+use once_cell::sync::Lazy;
+use parking_lot::Mutex;
 use redis::Commands;
 use rust_decimal::Decimal;
 use std::io::{self, BufRead};
-use uuid::Uuid;
 
-use crate::models::{PaymentRequest, PaymentSummary, ProcessorSummary};
-use crate::redis_pool::{
-    AGGREGATE_SCRIPT, QUEUE_PAYMENT_SCRIPT, RedisConnection, select_granularity,
-};
+use crate::models::{PaymentSummary, ProcessorSummary};
+use crate::redis_pool::{AGGREGATE_SCRIPT, RedisConnection, select_granularity};
+
+struct RedisPayload {
+    data: String, // formatted "{timestamp}|{json}"
+    score: i64,   // timestamp_ms for ZADD
+}
+
+// global channel using may mpsc (no blocking on send)
+static REDIS_CHANNEL: Lazy<(
+    mpsc::Sender<RedisPayload>,
+    Mutex<Option<mpsc::Receiver<RedisPayload>>>,
+)> = Lazy::new(|| {
+    let (tx, rx) = mpsc::channel();
+    (tx, Mutex::new(Some(rx)))
+});
 
 #[derive(Clone)]
 pub struct Service<'a> {
@@ -16,9 +31,12 @@ pub struct Service<'a> {
 }
 
 impl HttpService for Service<'static> {
+    #[inline(always)]
     fn call(&mut self, req: Request, rsp: &mut Response) -> io::Result<()> {
         match req.path() {
-            "/payments" => self.handle_payment(req, rsp),
+            "/payments" => {
+                handle_payment_inline(req);
+            }
             path if path.starts_with("/payments-summary") => {
                 self.handle_summary(&req, rsp);
             }
@@ -31,35 +49,84 @@ impl HttpService for Service<'static> {
     }
 }
 
+// Inline payment handling - no method call overhead
+#[inline(always)]
+fn handle_payment_inline(req: Request) {
+    let mut body_reader = req.body();
+    let body = unsafe { body_reader.fill_buf().unwrap_unchecked() };
+
+    let correlation_id = unsafe { std::str::from_utf8_unchecked(&body[18..54]) };
+
+    let amount_start = 65;
+    let amount_end = body.len() - 1;
+    let amount = unsafe { std::str::from_utf8_unchecked(&body[amount_start..amount_end]) };
+
+    let now = Utc::now();
+    let ts = now.timestamp_millis();
+    let rfc3339 = now.to_rfc3339();
+
+    let data = format!(
+        "{ts}|{{\"correlationId\":\"{correlation_id}\",\"amount\":{amount},\"requestedAt\":\"{rfc3339}\"}}"
+    );
+
+    let _ = REDIS_CHANNEL.0.send(RedisPayload { data, score: ts });
+}
+
 impl Service<'static> {
-    #[inline]
-    fn handle_payment(&mut self, req: Request, _rsp: &Response) {
-        let mut body_reader = req.body();
-        let body = unsafe { body_reader.fill_buf().unwrap_unchecked() };
-        let body_len = body.len();
+    pub fn start_redis_worker(conn: RedisConnection<'static>) {
+        may::go!(move || {
+            let rx = {
+                let mut guard = REDIS_CHANNEL.1.lock();
+                guard.take().expect("Redis worker already started")
+            };
 
-        let correlation_id = unsafe { Uuid::try_parse_ascii(&body[18..54]).unwrap_unchecked() };
+            let mut batch = Vec::with_capacity(200);
 
-        let amount_str = unsafe { std::str::from_utf8_unchecked(&body[65..body_len - 1]) };
-        let amount = unsafe { Decimal::from_str_exact(amount_str).unwrap_unchecked() };
+            // periodic flushes
+            let (timer_tx, timer_rx) = mpsc::channel();
 
-        let payment = PaymentRequest {
-            correlation_id,
-            amount,
-        };
+            // timer coroutine
+            may::go!(move || {
+                loop {
+                    may::coroutine::sleep(std::time::Duration::from_micros(500));
+                    if timer_tx.send(()).is_err() {
+                        break;
+                    }
+                }
+            });
 
-        let clone = self.clone();
-        may::go!(move || { clone.queue_payment(&payment) });
+            loop {
+                select!(
+                    payload = rx.recv() => {
+                        match payload {
+                            Ok(p) => {
+                                batch.push(p);
 
-        // match self.queue_payment(&payment) {
-        //     Ok(_) => {
-        //         rsp.status_code(202, "Accepted");
-        //     }
-        //     Err(e) => {
-        //         eprintln!("Redis error: {e}");
-        //         rsp.status_code(500, "Internal Server Error");
-        //     }
-        // }
+                                // drain all available
+                                while let Ok(p) = rx.try_recv() {
+                                    batch.push(p);
+                                    if batch.len() >= 200 {
+                                        break;
+                                    }
+                                }
+
+                                // larger than 100 process immediately
+                                if batch.len() >= 100 {
+                                    flush_batch(&conn, &mut batch);
+                                }
+                            }
+                            Err(_) => return,
+                        }
+                    },
+                    _ = timer_rx.recv() => {
+                        // flush on low traffic
+                        if !batch.is_empty() {
+                            flush_batch(&conn, &mut batch);
+                        }
+                    }
+                );
+            }
+        });
     }
 
     #[inline]
@@ -68,13 +135,17 @@ impl Service<'static> {
 
         match self.get_payment_summary(from_param, to_param) {
             Ok(summary) => {
-                let json = format!(
-                    r#"{{"default":{{"totalRequests":{},"totalAmount":{}}},"fallback":{{"totalRequests":{},"totalAmount":{}}}}}"#,
-                    summary.default.total_requests,
-                    summary.default.total_amount,
-                    summary.fallback.total_requests,
-                    summary.fallback.total_amount
-                );
+                let mut json = String::with_capacity(256);
+                json.push_str(r#"{"default":{"totalRequests":"#);
+                json.push_str(&summary.default.total_requests.to_string());
+                json.push_str(r#","totalAmount":"#);
+                json.push_str(&summary.default.total_amount.to_string());
+                json.push_str(r#"},"fallback":{"totalRequests":"#);
+                json.push_str(&summary.fallback.total_requests.to_string());
+                json.push_str(r#","totalAmount":"#);
+                json.push_str(&summary.fallback.total_amount.to_string());
+                json.push_str(r#"}}"#);
+
                 rsp.header("Content-Type: application/json");
                 rsp.body_vec(json.into_bytes());
             }
@@ -96,26 +167,6 @@ impl Service<'static> {
                 rsp.status_code(500, "Internal Server Error");
             }
         }
-    }
-
-    #[inline]
-    fn queue_payment(&self, payment: &PaymentRequest) -> Result<(), redis::RedisError> {
-        self.conn.with_conn(|conn| {
-            let now = Utc::now();
-            let timestamp_ms = now.timestamp_millis();
-            let requested_at = now.to_rfc3339();
-
-            let payload = format!(
-                "{timestamp_ms}|{{\"correlationId\":\"{}\",\"amount\":{},\"requestedAt\":\"{requested_at}\"}}",
-                payment.correlation_id, payment.amount
-            );
-
-            QUEUE_PAYMENT_SCRIPT
-                .key("payments:queue")
-                .arg(&payload)
-                .arg(timestamp_ms)
-                .invoke(conn)
-        })
     }
 
     #[inline]
@@ -153,11 +204,11 @@ impl Service<'static> {
         self.conn.with_conn(|conn| {
             let pattern = format!("p:{granularity}:*:{category}");
 
-            let result: Vec<String> = AGGREGATE_SCRIPT
+            let result = AGGREGATE_SCRIPT
                 .arg(&pattern)
                 .arg(from_ms / divisor)
                 .arg(to_ms / divisor)
-                .invoke(conn)?;
+                .invoke::<Vec<String>>(conn)?;
 
             let total_requests = result
                 .first()
@@ -191,6 +242,48 @@ impl Service<'static> {
             Ok(())
         })
     }
+}
+
+// Optimized batch flushing with pre-allocated buffers
+#[inline(always)]
+fn flush_batch(conn: &RedisConnection<'static>, batch: &mut Vec<RedisPayload>) {
+    if batch.is_empty() {
+        return;
+    }
+
+    conn.with_conn(|redis_conn| {
+        // if batch.len() == 1 {
+        //     // Single item - use Lua script
+        //     let payload = &batch[0];
+        //     let _: Result<(), _> = QUEUE_PAYMENT_SCRIPT
+        //         .key("payments:queue")
+        //         .arg(&payload.data)
+        //         .arg(payload.score)
+        //         .invoke(redis_conn);
+        // } else {
+        //     // Multiple items - single ZADD with all members
+        //     let mut cmd = redis::cmd("ZADD");
+        //     cmd.arg("payments:queue");
+
+        //     for payload in batch.iter() {
+        //         cmd.arg(payload.score);
+        //         cmd.arg(&payload.data);
+        //     }
+
+        //     let _: Result<(), _> = cmd.query(redis_conn);
+        // }
+        let mut cmd = redis::cmd("ZADD");
+        cmd.arg("payments:queue");
+
+        for payload in batch.iter() {
+            cmd.arg(payload.score);
+            cmd.arg(&payload.data);
+        }
+
+        let _: Result<(), _> = cmd.query(redis_conn);
+    });
+
+    batch.clear();
 }
 
 #[inline]
