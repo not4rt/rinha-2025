@@ -1,8 +1,7 @@
-use bytes::{BufMut, BytesMut};
 use once_cell::sync::Lazy;
 use parking_lot::Mutex;
 use redis::{Connection, Script};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use smallvec::SmallVec;
 
 // Lua script for queueing payment
 pub static QUEUE_PAYMENT_SCRIPT: Lazy<Script> = Lazy::new(|| {
@@ -28,21 +27,29 @@ pub static PROCESS_PAYMENT_SCRIPT: Lazy<Script> = Lazy::new(|| {
         local hour_key = KEYS[4]
         local amount = ARGV[1]
 
+        -- Update counters
         redis.call('HINCRBY', ms_key, 'count', 1)
         redis.call('HINCRBYFLOAT', ms_key, 'amount', amount)
-        redis.call('EXPIRE', ms_key, 3600)  -- 1 hour
-
         redis.call('HINCRBY', sec_key, 'count', 1)
         redis.call('HINCRBYFLOAT', sec_key, 'amount', amount)
-        redis.call('EXPIRE', sec_key, 86400)  -- 24 hours
-
         redis.call('HINCRBY', min_key, 'count', 1)
         redis.call('HINCRBYFLOAT', min_key, 'amount', amount)
-        redis.call('EXPIRE', min_key, 604800)  -- 7 days
-
         redis.call('HINCRBY', hour_key, 'count', 1)
         redis.call('HINCRBYFLOAT', hour_key, 'amount', amount)
-        redis.call('EXPIRE', hour_key, 2592000)  -- 30 days
+
+        -- Only set EXPIRE if key is new (TTL returns -2 for non-existent keys)
+        if redis.call('TTL', ms_key) == -2 then
+            redis.call('EXPIRE', ms_key, 3600)
+        end
+        if redis.call('TTL', sec_key) == -2 then
+            redis.call('EXPIRE', sec_key, 86400)
+        end
+        if redis.call('TTL', min_key) == -2 then
+            redis.call('EXPIRE', min_key, 604800)
+        end
+        if redis.call('TTL', hour_key) == -2 then
+            redis.call('EXPIRE', hour_key, 2592000)
+        end
 
         return 1
     "#,
@@ -60,9 +67,8 @@ pub static FETCH_BATCH_SCRIPT: Lazy<Script> = Lazy::new(|| {
         local payments = redis.call('ZRANGEBYSCORE', queue_key, '-inf', max_score, 'LIMIT', 0, batch_size)
 
         if #payments > 0 then
-            for _, payment in ipairs(payments) do
-                redis.call('ZREM', queue_key, payment)
-            end
+            -- Remove all at once using ZREM with multiple members
+            redis.call('ZREM', queue_key, unpack(payments))
         end
 
         return payments
@@ -77,75 +83,82 @@ pub static AGGREGATE_SCRIPT: Lazy<Script> = Lazy::new(|| {
         local pattern = ARGV[1]
         local from_ts = tonumber(ARGV[2])
         local to_ts = tonumber(ARGV[3])
-
-        local keys = redis.call('KEYS', pattern)
+        local cursor = "0"
         local total_count = 0
         local total_amount = 0
 
-        for _, key in ipairs(keys) do
-            local timestamp = tonumber(string.match(key, ':(%d+):'))
-            if timestamp and timestamp >= from_ts and timestamp <= to_ts then
-                local count = redis.call('HGET', key, 'count')
-                local amount = redis.call('HGET', key, 'amount')
-                if count then total_count = total_count + tonumber(count) end
-                if amount then total_amount = total_amount + tonumber(amount) end
+        repeat
+            local result = redis.call('SCAN', cursor, 'MATCH', pattern, 'COUNT', 100)
+            cursor = result[1]
+            local keys = result[2]
+
+            for _, key in ipairs(keys) do
+                local timestamp = tonumber(string.match(key, ':(%d+):'))
+                if timestamp and timestamp >= from_ts and timestamp <= to_ts then
+                    local count = redis.call('HGET', key, 'count')
+                    local amount = redis.call('HGET', key, 'amount')
+                    if count then total_count = total_count + tonumber(count) end
+                    if amount then total_amount = total_amount + tonumber(amount) end
+                end
             end
-        end
+        until cursor == "0"
 
         return {total_count, tostring(total_amount)}
     "#,
     )
 });
 
-// Buffer pool for zero-copy operations
-pub struct BufferPool {
-    buffers: Vec<BytesMut>,
-    index: AtomicUsize,
-}
-
-impl BufferPool {
-    pub fn new(count: usize, capacity: usize) -> Self {
-        let mut buffers = Vec::with_capacity(count);
-        for _ in 0..count {
-            buffers.push(BytesMut::with_capacity(capacity));
-        }
-        Self {
-            buffers,
-            index: AtomicUsize::new(0),
-        }
-    }
-
-    #[inline(always)]
-    pub fn get(&self) -> BytesMut {
-        let _idx = self.index.fetch_add(1, Ordering::Relaxed) % self.buffers.len();
-        let mut buf = BytesMut::with_capacity(4096);
-        buf.clear();
-        buf
-    }
-}
-
-pub static BUFFER_POOL: Lazy<BufferPool> = Lazy::new(|| BufferPool::new(1024, 4096));
-
-// Fast key formatting with zero-copy
 #[inline(always)]
 pub fn format_time_key(timestamp: i64, category: &str, granularity: &str) -> String {
-    let mut buffer = BUFFER_POOL.get();
+    let mut buffer = [0u8; 64];
 
-    buffer.put_slice(b"p:");
-    buffer.put_slice(granularity.as_bytes());
-    buffer.put_u8(b':');
+    buffer[0] = b'p';
+    buffer[1] = b':';
+    let mut pos = 2;
+
+    let gran_bytes = granularity.as_bytes();
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            gran_bytes.as_ptr(),
+            buffer.as_mut_ptr().add(pos),
+            gran_bytes.len(),
+        );
+    }
+    pos += gran_bytes.len();
+
+    buffer[pos] = b':';
+    pos += 1;
 
     let mut num_buf = itoa::Buffer::new();
-    buffer.put_slice(num_buf.format(timestamp).as_bytes());
+    let num_str = num_buf.format(timestamp);
+    let num_bytes = num_str.as_bytes();
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            num_bytes.as_ptr(),
+            buffer.as_mut_ptr().add(pos),
+            num_bytes.len(),
+        );
+    }
+    pos += num_bytes.len();
 
-    buffer.put_u8(b':');
-    buffer.put_slice(category.as_bytes());
+    buffer[pos] = b':';
+    pos += 1;
 
-    unsafe { String::from_utf8_unchecked(buffer.to_vec()) }
+    let cat_bytes = category.as_bytes();
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            cat_bytes.as_ptr(),
+            buffer.as_mut_ptr().add(pos),
+            cat_bytes.len(),
+        );
+    }
+    pos += cat_bytes.len();
+
+    unsafe { String::from_utf8_unchecked(buffer[..pos].to_vec()) }
 }
 
 pub struct RedisPool {
-    connections: Vec<Mutex<Connection>>,
+    connections: SmallVec<[Mutex<Connection>; 16]>,
 }
 
 impl RedisPool {

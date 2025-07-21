@@ -47,15 +47,12 @@ services:
       sh -c "
       ./rust_coroutines_rinha_2025
       --server
-      --workers
       "
     deploy:
       resources:
         limits:
-          memory: 110M
-          cpus: "0.5"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+          memory: 55M
+          cpus: "0.2"
 
   backend2:
     build: .
@@ -74,13 +71,60 @@ services:
       sh -c "
       ./rust_coroutines_rinha_2025
       --server
+      "
+    deploy:
+      resources:
+        limits:
+          memory: 55M
+          cpus: "0.2"
+
+  worker1:
+    build: .
+    environment:
+      PORT: 8080
+      DEFAULT_PROCESSOR_URL: http://payment-processor-default:8080
+      FALLBACK_PROCESSOR_URL: http://payment-processor-fallback:8080
+      REDIS_URL: redis://valkey
+    depends_on:
+      - valkey
+    networks:
+      - backend
+      - payment-processor
+    restart: unless-stopped
+    command: >
+      sh -c "
+      ./rust_coroutines_rinha_2025
       --workers
       "
     deploy:
       resources:
         limits:
-          memory: 110M
-          cpus: "0.5"
+          memory: 55M
+          cpus: "0.3"
+
+  worker2:
+    build: .
+    environment:
+      PORT: 8080
+      DEFAULT_PROCESSOR_URL: http://payment-processor-default:8080
+      FALLBACK_PROCESSOR_URL: http://payment-processor-fallback:8080
+      REDIS_URL: redis://valkey
+    depends_on:
+      - valkey
+    networks:
+      - backend
+      - payment-processor
+    restart: unless-stopped
+    command: >
+      sh -c "
+      ./rust_coroutines_rinha_2025
+      --workers
+      "
+    deploy:
+      resources:
+        limits:
+          memory: 55M
+          cpus: "0.3"
 
   valkey:
     image: valkey/valkey:latest

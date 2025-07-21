@@ -20,6 +20,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ahash"
+version = "0.8.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5a15f179cd60c4584b8a8c596927aadc462e27f2ca70c04e0071964a73ba7a75"
+dependencies = [
+ "cfg-if",
+ "getrandom 0.3.3",
+ "once_cell",
+ "version_check",
+ "zerocopy",
+]
+
+[[package]]
 name = "android-tzdata"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -345,7 +358,7 @@ version = "0.12.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a9ee70c43aaf417c914396645a0fa852624801b24ebb7ae78fe8272889ac888"
 dependencies = [
- "ahash",
+ "ahash 0.7.8",
 ]
 
 [[package]]
@@ -858,6 +871,7 @@ version = "0.32.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e1f66bf4cac9733a23bcdf1e0e01effbaaad208567beba68be8f67e5f4af3ee1"
 dependencies = [
+ "ahash 0.8.12",
  "combine",
  "itoa",
  "num-bigint",
@@ -931,7 +945,7 @@ dependencies = [
 
 [[package]]
 name = "rust_coroutines_rinha_2025"
-version = "1.0.3"
+version = "1.0.4"
 dependencies = [
  "bytes",
  "chrono",
@@ -945,8 +959,6 @@ dependencies = [
  "parking_lot",
  "redis",
  "rust_decimal",
- "serde",
- "serde_json",
  "smallvec",
  "ureq",
  "uuid",
@@ -1276,9 +1288,7 @@ version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3cf4199d1e5d15ddd86a694e4d0dffa9c323ce759fea589f00fef9d81cc1931d"
 dependencies = [
- "getrandom 0.3.3",
  "js-sys",
- "serde",
  "wasm-bindgen",
 ]
 

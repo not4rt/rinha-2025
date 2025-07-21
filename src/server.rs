@@ -5,7 +5,7 @@ use rust_decimal::Decimal;
 use std::io::{self, BufRead};
 use uuid::Uuid;
 
-use crate::models::{PaymentRequest, PaymentSummary, ProcessorSummary, QueuedPayment};
+use crate::models::{PaymentRequest, PaymentSummary, ProcessorSummary};
 use crate::redis_pool::{
     AGGREGATE_SCRIPT, QUEUE_PAYMENT_SCRIPT, RedisConnection, select_granularity,
 };
@@ -18,7 +18,7 @@ pub struct Service<'a> {
 impl HttpService for Service<'static> {
     fn call(&mut self, req: Request, rsp: &mut Response) -> io::Result<()> {
         match req.path() {
-            "/payments" => self.handle_payment(req, rsp)?,
+            "/payments" => self.handle_payment(req, rsp),
             path if path.starts_with("/payments-summary") => {
                 self.handle_summary(&req, rsp);
             }
@@ -33,9 +33,9 @@ impl HttpService for Service<'static> {
 
 impl Service<'static> {
     #[inline]
-    fn handle_payment(&mut self, req: Request, rsp: &mut Response) -> io::Result<()> {
+    fn handle_payment(&mut self, req: Request, _rsp: &Response) {
         let mut body_reader = req.body();
-        let body = body_reader.fill_buf()?;
+        let body = unsafe { body_reader.fill_buf().unwrap_unchecked() };
         let body_len = body.len();
 
         let correlation_id = unsafe { Uuid::try_parse_ascii(&body[18..54]).unwrap_unchecked() };
@@ -60,8 +60,6 @@ impl Service<'static> {
         //         rsp.status_code(500, "Internal Server Error");
         //     }
         // }
-
-        Ok(())
     }
 
     #[inline]
@@ -70,7 +68,13 @@ impl Service<'static> {
 
         match self.get_payment_summary(from_param, to_param) {
             Ok(summary) => {
-                let json = json_serialize(&summary);
+                let json = format!(
+                    r#"{{"default":{{"totalRequests":{},"totalAmount":{}}},"fallback":{{"totalRequests":{},"totalAmount":{}}}}}"#,
+                    summary.default.total_requests,
+                    summary.default.total_amount,
+                    summary.fallback.total_requests,
+                    summary.fallback.total_amount
+                );
                 rsp.header("Content-Type: application/json");
                 rsp.body_vec(json.into_bytes());
             }
@@ -99,15 +103,12 @@ impl Service<'static> {
         self.conn.with_conn(|conn| {
             let now = Utc::now();
             let timestamp_ms = now.timestamp_millis();
+            let requested_at = now.to_rfc3339();
 
-            let queued = QueuedPayment {
-                id: &Uuid::new_v4().to_string(),
-                correlation_id: payment.correlation_id,
-                amount: payment.amount,
-                requested_at: timestamp_ms,
-            };
-
-            let payload = serde_json::to_string(&queued).unwrap();
+            let payload = format!(
+                "{timestamp_ms}|{{\"correlationId\":\"{}\",\"amount\":{},\"requestedAt\":\"{requested_at}\"}}",
+                payment.correlation_id, payment.amount
+            );
 
             QUEUE_PAYMENT_SCRIPT
                 .key("payments:queue")
@@ -224,19 +225,4 @@ fn parse_rfc3339_to_millis(date_str: &str) -> Option<i64> {
     DateTime::parse_from_rfc3339(date_str)
         .ok()
         .map(|dt| dt.timestamp_millis())
-}
-
-#[inline]
-fn json_serialize(summary: &PaymentSummary) -> String {
-    let mut buffer = String::with_capacity(256);
-    buffer.push_str(r#"{"default":{"totalRequests":"#);
-    buffer.push_str(&summary.default.total_requests.to_string());
-    buffer.push_str(r#","totalAmount":"#);
-    buffer.push_str(&summary.default.total_amount.to_string());
-    buffer.push_str(r#"},"fallback":{"totalRequests":"#);
-    buffer.push_str(&summary.fallback.total_requests.to_string());
-    buffer.push_str(r#","totalAmount":"#);
-    buffer.push_str(&summary.fallback.total_amount.to_string());
-    buffer.push_str(r#"}}"#);
-    buffer
 }

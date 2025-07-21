@@ -21,7 +21,7 @@ fn start_workers(
         let _ = go!(
             may::coroutine::Builder::new()
                 .name(format!("worker-{i}"))
-                .stack_size(0x1000),
+                .stack_size(0x4000),
             move || {
                 println!("Worker {i} started");
 
@@ -35,7 +35,7 @@ fn start_workers(
                         }
                         Ok(n) => {
                             if n > 100 {
-                                eprintln!("Processed {n} payments");
+                                println!("Worker {i}: Processed {n} payments");
                             }
                         }
                         Err(e) => {
