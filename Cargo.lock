@@ -961,7 +961,6 @@ dependencies = [
  "rust_decimal",
  "smallvec",
  "ureq",
- "uuid",
 ]
 
 [[package]]

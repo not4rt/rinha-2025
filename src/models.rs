@@ -1,11 +1,11 @@
 use rust_decimal::Decimal;
 // use serde::{Deserialize, Serialize};
-use uuid::Uuid;
+// use uuid::Uuid;
 
-pub struct PaymentRequest {
-    pub correlation_id: Uuid,
-    pub amount: Decimal,
-}
+// pub struct PaymentRequest {
+//     pub correlation_id: Uuid,
+//     pub amount: Decimal,
+// }
 
 // #[derive(Serialize, Deserialize)]
 // pub struct ProcessorPayment<'a> {

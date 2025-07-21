@@ -3,9 +3,8 @@ use may_minihttp::{HttpService, Request, Response};
 use redis::Commands;
 use rust_decimal::Decimal;
 use std::io::{self, BufRead};
-use uuid::Uuid;
 
-use crate::models::{PaymentRequest, PaymentSummary, ProcessorSummary};
+use crate::models::{PaymentSummary, ProcessorSummary};
 use crate::redis_pool::{
     AGGREGATE_SCRIPT, QUEUE_PAYMENT_SCRIPT, RedisConnection, select_granularity,
 };
@@ -36,20 +35,17 @@ impl Service<'static> {
     fn handle_payment(&mut self, req: Request, _rsp: &Response) {
         let mut body_reader = req.body();
         let body = unsafe { body_reader.fill_buf().unwrap_unchecked() };
-        let body_len = body.len();
 
-        let correlation_id = unsafe { Uuid::try_parse_ascii(&body[18..54]).unwrap_unchecked() };
+        let correlation_id = unsafe { std::str::from_utf8_unchecked(&body[18..54]) };
 
-        let amount_str = unsafe { std::str::from_utf8_unchecked(&body[65..body_len - 1]) };
-        let amount = unsafe { Decimal::from_str_exact(amount_str).unwrap_unchecked() };
+        let amount_start = 65;
+        let amount_end = body.len() - 1;
+        let amount = unsafe { std::str::from_utf8_unchecked(&body[amount_start..amount_end]) };
 
-        let payment = PaymentRequest {
-            correlation_id,
-            amount,
-        };
-
-        let clone = self.clone();
-        may::go!(move || { clone.queue_payment(&payment) });
+        let correlation_id = correlation_id.to_string();
+        let amount = amount.to_string();
+        let conn = self.conn;
+        may::go!(move || { test_queue_payment(&conn, correlation_id, amount) });
 
         // match self.queue_payment(&payment) {
         //     Ok(_) => {
@@ -99,15 +95,18 @@ impl Service<'static> {
     }
 
     #[inline]
-    fn queue_payment(&self, payment: &PaymentRequest) -> Result<(), redis::RedisError> {
+    fn queue_payment(
+        &self,
+        correlation_id: String,
+        amount: String,
+    ) -> Result<(), redis::RedisError> {
         self.conn.with_conn(|conn| {
             let now = Utc::now();
             let timestamp_ms = now.timestamp_millis();
             let requested_at = now.to_rfc3339();
 
             let payload = format!(
-                "{timestamp_ms}|{{\"correlationId\":\"{}\",\"amount\":{},\"requestedAt\":\"{requested_at}\"}}",
-                payment.correlation_id, payment.amount
+                "{timestamp_ms}|{{\"correlationId\":\"{correlation_id}\",\"amount\":{amount},\"requestedAt\":\"{requested_at}\"}}"
             );
 
             QUEUE_PAYMENT_SCRIPT
@@ -225,4 +224,27 @@ fn parse_rfc3339_to_millis(date_str: &str) -> Option<i64> {
     DateTime::parse_from_rfc3339(date_str)
         .ok()
         .map(|dt| dt.timestamp_millis())
+}
+
+#[inline]
+fn test_queue_payment(
+    conn: &RedisConnection<'static>,
+    correlation_id: String,
+    amount: String,
+) -> Result<(), redis::RedisError> {
+    conn.with_conn(|conn| {
+            let now = Utc::now();
+            let timestamp_ms = now.timestamp_millis();
+            let requested_at = now.to_rfc3339();
+
+            let payload = format!(
+                "{timestamp_ms}|{{\"correlationId\":\"{correlation_id}\",\"amount\":{amount},\"requestedAt\":\"{requested_at}\"}}"
+            );
+
+            QUEUE_PAYMENT_SCRIPT
+                .key("payments:queue")
+                .arg(&payload)
+                .arg(timestamp_ms)
+                .invoke(conn)
+        })
 }
