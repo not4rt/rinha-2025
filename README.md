@@ -8,7 +8,7 @@ Implementação da [**Rinha de Backend 2025**](https://github.com/zanfranceschi/
 - 1 cache - Redis
 
 ## Objetivos dessa implementação
-- [ ] Tempos de resposta da API < 2ms
+- [ ] P99 da API < 1.5ms
     - [X] Localmente
     - [ ] Nos testes oficiais
 - [X] Aprender sobre implementação de sistemas distribuidos e filas

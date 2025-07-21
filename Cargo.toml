@@ -31,6 +31,10 @@ codegen-units = 1
 strip = true
 debug = false
 overflow-checks = false
+incremental = false
+
+[profile.release.build-override]
+opt-level = 3
 
 [profile.release.package."*"]
 opt-level = 3

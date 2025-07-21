@@ -9,7 +9,9 @@ use rust_decimal::Decimal;
 use std::io::{self, BufRead};
 
 use crate::models::{PaymentSummary, ProcessorSummary};
-use crate::redis_pool::{AGGREGATE_SCRIPT, RedisConnection, select_granularity};
+use crate::redis_pool::{
+    AGGREGATE_SCRIPT, QUEUE_PAYMENT_SCRIPT, RedisConnection, select_granularity,
+};
 
 struct RedisPayload {
     data: String, // formatted "{timestamp}|{json}"
@@ -244,7 +246,6 @@ impl Service<'static> {
     }
 }
 
-// Optimized batch flushing with pre-allocated buffers
 #[inline(always)]
 fn flush_batch(conn: &RedisConnection<'static>, batch: &mut Vec<RedisPayload>) {
     if batch.is_empty() {
@@ -252,35 +253,24 @@ fn flush_batch(conn: &RedisConnection<'static>, batch: &mut Vec<RedisPayload>) {
     }
 
     conn.with_conn(|redis_conn| {
-        // if batch.len() == 1 {
-        //     // Single item - use Lua script
-        //     let payload = &batch[0];
-        //     let _: Result<(), _> = QUEUE_PAYMENT_SCRIPT
-        //         .key("payments:queue")
-        //         .arg(&payload.data)
-        //         .arg(payload.score)
-        //         .invoke(redis_conn);
-        // } else {
-        //     // Multiple items - single ZADD with all members
-        //     let mut cmd = redis::cmd("ZADD");
-        //     cmd.arg("payments:queue");
+        if batch.len() == 1 {
+            let payload = &batch[0];
+            let _: Result<(), _> = QUEUE_PAYMENT_SCRIPT
+                .key("payments:queue")
+                .arg(&payload.data)
+                .arg(payload.score)
+                .invoke(redis_conn);
+        } else {
+            let mut cmd = redis::cmd("ZADD");
+            cmd.arg("payments:queue");
 
-        //     for payload in batch.iter() {
-        //         cmd.arg(payload.score);
-        //         cmd.arg(&payload.data);
-        //     }
+            for payload in batch.iter() {
+                cmd.arg(payload.score);
+                cmd.arg(&payload.data);
+            }
 
-        //     let _: Result<(), _> = cmd.query(redis_conn);
-        // }
-        let mut cmd = redis::cmd("ZADD");
-        cmd.arg("payments:queue");
-
-        for payload in batch.iter() {
-            cmd.arg(payload.score);
-            cmd.arg(&payload.data);
+            let _: Result<(), _> = cmd.query(redis_conn);
         }
-
-        let _: Result<(), _> = cmd.query(redis_conn);
     });
 
     batch.clear();

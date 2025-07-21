@@ -198,7 +198,7 @@ fn aggregate_payment(
 // }
 
 #[inline(always)]
-fn parse_payment_data(data: &str) -> (i64, &str, &str) {
+pub fn parse_payment_data(data: &str) -> (i64, &str, &str) {
     let pipe_pos = unsafe { data.find('|').unwrap_unchecked() };
 
     // Parse timestamp
