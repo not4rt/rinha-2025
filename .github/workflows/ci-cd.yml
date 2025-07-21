@@ -2,9 +2,9 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches: [ main ]
+    branches: [main, no-channels]
   pull_request:
-    branches: [ main ]
+    branches: [main, no-channels]
 
 env:
   REGISTRY: docker.io
@@ -13,178 +13,178 @@ env:
 jobs:
   test-and-deploy:
     runs-on: ubuntu-latest
-    
+
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-    - name: Extract version from Cargo.toml
-      id: version
-      run: |
-        VERSION=$(grep "^version = " Cargo.toml | sed 's/version = "\(.*\)"/\1/')
-        echo "version=$VERSION" >> $GITHUB_OUTPUT
-        echo "Version extracted: $VERSION"
+      - name: Extract version from Cargo.toml
+        id: version
+        run: |
+          VERSION=$(grep "^version = " Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Version extracted: $VERSION"
 
-    - name: Build Docker image
-      uses: docker/build-push-action@v5
-      with:
-        context: .
-        push: false
-        tags: |
-          ${{ env.IMAGE_NAME }}:latest
-          ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
-        cache-from: type=gha
-        cache-to: type=gha,mode=max
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: |
+            ${{ env.IMAGE_NAME }}:latest
+            ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-    - name: Install K6
-      run: |
-        sudo gpg -k
-        sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
-        echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
-        sudo apt-get update
-        sudo apt-get install k6
+      - name: Install K6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6
 
-    - name: Start payment processor services
-      run: |
-        cd rinha-test/payment-processor
-        docker compose up -d
-        cd ../..
+      - name: Start payment processor services
+        run: |
+          cd rinha-test/payment-processor
+          docker compose up -d
+          cd ../..
 
-    - name: Start main application services
-      run: |
-        docker compose up -d
-        
-    - name: Wait for services to be ready
-      run: |
-        echo "Waiting for services to be ready..."
-        max_attempts=30
-        attempt=1
-        while [ $attempt -le $max_attempts ]; do
-          if curl -f -s http://localhost:9999/payments-summary > /dev/null 2>&1; then
-            echo "Services are ready!"
-            break
-          fi
-          echo "Attempt $attempt/$max_attempts - Services not ready yet, waiting..."
-          sleep 10
-          ((attempt++))
-        done
-        
-        if [ $attempt -gt $max_attempts ]; then
-          echo "Services failed to start properly"
-          docker compose logs
-          exit 1
-        fi
+      - name: Start main application services
+        run: |
+          docker compose up -d
 
-    - name: Run K6 performance tests
-      id: k6_test
-      run: |
-        cd rinha-test
-        echo "Running K6 tests..."
-        k6 run -e MAX_REQUESTS=500 -e PARTICIPANT=github-action --summary-export=test-results.json rinha.js > k6-output.log 2>&1
-        
-        # Always show test output for debugging
-        cat k6-output.log
-        
-        # Extract metrics from test results
-        if [ -f "test-results.json" ]; then
-          P99=$(jq -r '.metrics["http_req_duration{expected_response:true}"]["p(99)"]' test-results.json)
-          TOTAL_AMOUNT=$(jq -r '.metrics["total_transactions_amount"]["count"]' test-results.json)
-          
-          echo "p99=$P99" >> $GITHUB_OUTPUT
-          echo "total_amount=$TOTAL_AMOUNT" >> $GITHUB_OUTPUT
-          echo "P99 duration: ${P99}ms"
-          echo "Total transactions amount: ${TOTAL_AMOUNT}"
-          
-          # Check if both metrics are valid
-          P99_VALID=false
-          AMOUNT_VALID=false
-          
-          if [ -n "$P99" ] && [ "$P99" != "null" ] && [ "$P99" != "" ]; then
-            if (( $(echo "$P99 < 1.5" | bc -l) )); then
-              P99_VALID=true
-              echo "✅ P99 test PASSED - ${P99}ms < 1.5ms"
-            else
-              echo "❌ P99 test FAILED - ${P99}ms >= 1.5ms"
+      - name: Wait for services to be ready
+        run: |
+          echo "Waiting for services to be ready..."
+          max_attempts=30
+          attempt=1
+          while [ $attempt -le $max_attempts ]; do
+            if curl -f -s http://localhost:9999/payments-summary > /dev/null 2>&1; then
+              echo "Services are ready!"
+              break
             fi
-          else
-            echo "❌ Could not extract P99 value from test results"
+            echo "Attempt $attempt/$max_attempts - Services not ready yet, waiting..."
+            sleep 10
+            ((attempt++))
+          done
+
+          if [ $attempt -gt $max_attempts ]; then
+            echo "Services failed to start properly"
+            docker compose logs
+            exit 1
           fi
-          
-          if [ -n "$TOTAL_AMOUNT" ] && [ "$TOTAL_AMOUNT" != "null" ] && [ "$TOTAL_AMOUNT" != "" ]; then
-            if (( $(echo "$TOTAL_AMOUNT > 250000" | bc -l) )); then
-              AMOUNT_VALID=true
-              echo "✅ Transaction amount test PASSED - ${TOTAL_AMOUNT} > 250000"
+
+      - name: Run K6 performance tests
+        id: k6_test
+        run: |
+          cd rinha-test
+          echo "Running K6 tests..."
+          k6 run -e MAX_REQUESTS=500 -e PARTICIPANT=github-action --summary-export=test-results.json rinha.js > k6-output.log 2>&1
+
+          # Always show test output for debugging
+          cat k6-output.log
+
+          # Extract metrics from test results
+          if [ -f "test-results.json" ]; then
+            P99=$(jq -r '.metrics["http_req_duration{expected_response:true}"]["p(99)"]' test-results.json)
+            TOTAL_AMOUNT=$(jq -r '.metrics["total_transactions_amount"]["count"]' test-results.json)
+
+            echo "p99=$P99" >> $GITHUB_OUTPUT
+            echo "total_amount=$TOTAL_AMOUNT" >> $GITHUB_OUTPUT
+            echo "P99 duration: ${P99}ms"
+            echo "Total transactions amount: ${TOTAL_AMOUNT}"
+
+            # Check if both metrics are valid
+            P99_VALID=false
+            AMOUNT_VALID=false
+
+            if [ -n "$P99" ] && [ "$P99" != "null" ] && [ "$P99" != "" ]; then
+              if (( $(echo "$P99 < 1.5" | bc -l) )); then
+                P99_VALID=true
+                echo "✅ P99 test PASSED - ${P99}ms < 1.5ms"
+              else
+                echo "❌ P99 test FAILED - ${P99}ms >= 1.5ms"
+              fi
             else
-              echo "❌ Transaction amount test FAILED - ${TOTAL_AMOUNT} <= 250000"
+              echo "❌ Could not extract P99 value from test results"
             fi
-          else
-            echo "❌ Could not extract total transaction amount from test results"
-          fi
-          
-          # Both criteria must pass
-          if [ "$P99_VALID" = true ] && [ "$AMOUNT_VALID" = true ]; then
-            echo "performance_passed=true" >> $GITHUB_OUTPUT
-            echo "🎉 ALL PERFORMANCE TESTS PASSED!"
+
+            if [ -n "$TOTAL_AMOUNT" ] && [ "$TOTAL_AMOUNT" != "null" ] && [ "$TOTAL_AMOUNT" != "" ]; then
+              if (( $(echo "$TOTAL_AMOUNT > 250000" | bc -l) )); then
+                AMOUNT_VALID=true
+                echo "✅ Transaction amount test PASSED - ${TOTAL_AMOUNT} > 250000"
+              else
+                echo "❌ Transaction amount test FAILED - ${TOTAL_AMOUNT} <= 250000"
+              fi
+            else
+              echo "❌ Could not extract total transaction amount from test results"
+            fi
+
+            # Both criteria must pass
+            if [ "$P99_VALID" = true ] && [ "$AMOUNT_VALID" = true ]; then
+              echo "performance_passed=true" >> $GITHUB_OUTPUT
+              echo "🎉 ALL PERFORMANCE TESTS PASSED!"
+            else
+              echo "performance_passed=false" >> $GITHUB_OUTPUT
+              echo "❌ Performance tests FAILED - Both P99 < 1.5ms AND total amount > 250000 required"
+            fi
           else
             echo "performance_passed=false" >> $GITHUB_OUTPUT
-            echo "❌ Performance tests FAILED - Both P99 < 1.5ms AND total amount > 250000 required"
+            echo "❌ Test results file not found"
           fi
-        else
-          echo "performance_passed=false" >> $GITHUB_OUTPUT
-          echo "❌ Test results file not found"
-        fi
 
-    - name: Stop services
-      if: always()
-      run: |
-        docker compose down --volumes
-        cd rinha-test/payment-processor
-        docker compose down --volumes
-        cd ../..
+      - name: Stop services
+        if: always()
+        run: |
+          docker compose down --volumes
+          cd rinha-test/payment-processor
+          docker compose down --volumes
+          cd ../..
 
-    # - name: Login to Docker Hub
-    #   if: steps.k6_test.outputs.performance_passed == 'true' && github.ref == 'refs/heads/main'
-    #   uses: docker/login-action@v3
-    #   with:
-    #     registry: ${{ env.REGISTRY }}
-    #     username: ${{ secrets.DOCKERHUB_USERNAME }}
-    #     password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # - name: Login to Docker Hub
+      #   if: steps.k6_test.outputs.performance_passed == 'true' && github.ref == 'refs/heads/main'
+      #   uses: docker/login-action@v3
+      #   with:
+      #     registry: ${{ env.REGISTRY }}
+      #     username: ${{ secrets.DOCKERHUB_USERNAME }}
+      #     password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-    # - name: Build and push Docker image
-    #   if: steps.k6_test.outputs.performance_passed == 'true' && github.ref == 'refs/heads/main'
-    #   uses: docker/build-push-action@v5
-    #   with:
-    #     context: .
-    #     push: true
-    #     tags: |
-    #       ${{ env.IMAGE_NAME }}:latest
-    #       ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
-    #     cache-from: type=gha
-    #     cache-to: type=gha,mode=max
+      # - name: Build and push Docker image
+      #   if: steps.k6_test.outputs.performance_passed == 'true' && github.ref == 'refs/heads/main'
+      #   uses: docker/build-push-action@v5
+      #   with:
+      #     context: .
+      #     push: true
+      #     tags: |
+      #       ${{ env.IMAGE_NAME }}:latest
+      #       ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}
+      #     cache-from: type=gha
+      #     cache-to: type=gha,mode=max
 
-    - name: Performance test summary
-      run: |
-        echo "## Performance Test Results" >> $GITHUB_STEP_SUMMARY
-        echo "- **P99 Duration**: ${{ steps.k6_test.outputs.p99 }}ms (threshold: < 1.5ms)" >> $GITHUB_STEP_SUMMARY
-        echo "- **Total Transaction Amount**: ${{ steps.k6_test.outputs.total_amount }} (threshold: > 250000)" >> $GITHUB_STEP_SUMMARY
-        echo "- **Overall Result**: ${{ steps.k6_test.outputs.performance_passed == 'true' && '✅ PASSED' || '❌ FAILED' }}" >> $GITHUB_STEP_SUMMARY
-        
-        if [[ "${{ steps.k6_test.outputs.performance_passed }}" == "true" && "${{ github.ref }}" == "refs/heads/main" ]]; then
-          echo "- **Docker Images**: Pushed to ${{ env.IMAGE_NAME }}:latest and ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-        else
-          echo "- **Docker Images**: Not pushed (performance criteria not met or not main branch)" >> $GITHUB_STEP_SUMMARY
-        fi
+      - name: Performance test summary
+        run: |
+          echo "## Performance Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "- **P99 Duration**: ${{ steps.k6_test.outputs.p99 }}ms (threshold: < 1.5ms)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total Transaction Amount**: ${{ steps.k6_test.outputs.total_amount }} (threshold: > 250000)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Overall Result**: ${{ steps.k6_test.outputs.performance_passed == 'true' && '✅ PASSED' || '❌ FAILED' }}" >> $GITHUB_STEP_SUMMARY
 
-    - name: Upload test artifacts
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: test-results
-        path: |
-          rinha-test/k6-output.log
-          rinha-test/test-results.json
-          rinha-test/partial-results.json
-        retention-days: 30
+          if [[ "${{ steps.k6_test.outputs.performance_passed }}" == "true" && "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo "- **Docker Images**: Pushed to ${{ env.IMAGE_NAME }}:latest and ${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "- **Docker Images**: Not pushed (performance criteria not met or not main branch)" >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload test artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            rinha-test/k6-output.log
+            rinha-test/test-results.json
+            rinha-test/partial-results.json
+          retention-days: 30
