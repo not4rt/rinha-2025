@@ -29,13 +29,13 @@ pub static PROCESS_PAYMENT_SCRIPT: Lazy<Script> = Lazy::new(|| {
 
         -- Update counters
         redis.call('HINCRBY', ms_key, 'count', 1)
-        redis.call('HINCRBYFLOAT', ms_key, 'amount', amount)
+        redis.call('HINCRBY', ms_key, 'amount', amount)
         redis.call('HINCRBY', sec_key, 'count', 1)
-        redis.call('HINCRBYFLOAT', sec_key, 'amount', amount)
+        redis.call('HINCRBY', sec_key, 'amount', amount)
         redis.call('HINCRBY', min_key, 'count', 1)
-        redis.call('HINCRBYFLOAT', min_key, 'amount', amount)
+        redis.call('HINCRBY', min_key, 'amount', amount)
         redis.call('HINCRBY', hour_key, 'count', 1)
-        redis.call('HINCRBYFLOAT', hour_key, 'amount', amount)
+        redis.call('HINCRBY', hour_key, 'amount', amount)
 
         -- Only set EXPIRE if key is new (TTL returns -2 for non-existent keys)
         if redis.call('TTL', ms_key) == -2 then
@@ -103,7 +103,7 @@ pub static AGGREGATE_SCRIPT: Lazy<Script> = Lazy::new(|| {
             end
         until cursor == "0"
 
-        return {total_count, tostring(total_amount)}
+        return {total_count, total_amount}
     "#,
     )
 });

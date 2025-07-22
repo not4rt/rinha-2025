@@ -1,4 +1,4 @@
-use rust_decimal::Decimal;
+// use rust_decimal::Decimal;
 // use serde::{Deserialize, Serialize};
 // use uuid::Uuid;
 
@@ -16,15 +16,15 @@ use rust_decimal::Decimal;
 //     pub requested_at: &'a str,
 // }
 
-pub struct PaymentSummary {
-    pub default: ProcessorSummary,
-    pub fallback: ProcessorSummary,
-}
+// pub struct PaymentSummary<'a> {
+//     pub default: &'a ProcessorSummary<'a>,
+//     pub fallback: &'a ProcessorSummary<'a>,
+// }
 
-pub struct ProcessorSummary {
-    pub total_requests: i64,
-    pub total_amount: Decimal,
-}
+// pub struct ProcessorSummary<'a> {
+//     pub total_requests: &'a str,
+//     pub total_amount: &'a str,
+// }
 
 pub enum Processor {
     Default,

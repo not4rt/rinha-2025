@@ -1,10 +1,8 @@
 use chrono::{DateTime, Utc};
 use may_minihttp::{HttpService, Request, Response};
 use redis::Commands;
-use rust_decimal::Decimal;
 use std::io::{self, BufRead};
 
-use crate::models::{PaymentSummary, ProcessorSummary};
 use crate::redis_pool::{
     AGGREGATE_SCRIPT, QUEUE_PAYMENT_SCRIPT, RedisConnection, select_granularity,
 };
@@ -45,7 +43,7 @@ impl Service<'static> {
         let correlation_id = correlation_id.to_string();
         let amount = amount.to_string();
         let conn = self.conn;
-        may::go!(move || { test_queue_payment(&conn, correlation_id, amount) });
+        may::go!(move || { queue_payment(&conn, correlation_id, amount) });
 
         // match self.queue_payment(&payment) {
         //     Ok(_) => {
@@ -63,13 +61,9 @@ impl Service<'static> {
         let (from_param, to_param) = parse_date_params(req.path());
 
         match self.get_payment_summary(from_param, to_param) {
-            Ok(summary) => {
+            Ok((default_total, default_amount, fallback_total, fallback_amount)) => {
                 let json = format!(
-                    r#"{{"default":{{"totalRequests":{},"totalAmount":{}}},"fallback":{{"totalRequests":{},"totalAmount":{}}}}}"#,
-                    summary.default.total_requests,
-                    summary.default.total_amount,
-                    summary.fallback.total_requests,
-                    summary.fallback.total_amount
+                    r#"{{"default":{{"totalRequests":{default_total},"totalAmount":{default_amount}}},"fallback":{{"totalRequests":{fallback_total},"totalAmount":{fallback_amount}}}}}"#
                 );
                 rsp.header("Content-Type: application/json");
                 rsp.body_vec(json.into_bytes());
@@ -95,49 +89,29 @@ impl Service<'static> {
     }
 
     #[inline]
-    fn queue_payment(
-        &self,
-        correlation_id: String,
-        amount: String,
-    ) -> Result<(), redis::RedisError> {
-        self.conn.with_conn(|conn| {
-            let now = Utc::now();
-            let timestamp_ms = now.timestamp_millis();
-            let requested_at = now.to_rfc3339();
-
-            let payload = format!(
-                "{timestamp_ms}|{{\"correlationId\":\"{correlation_id}\",\"amount\":{amount},\"requestedAt\":\"{requested_at}\"}}"
-            );
-
-            QUEUE_PAYMENT_SCRIPT
-                .key("payments:queue")
-                .arg(&payload)
-                .arg(timestamp_ms)
-                .invoke(conn)
-        })
-    }
-
-    #[inline]
     fn get_payment_summary(
         &self,
         from: Option<i64>,
         to: Option<i64>,
-    ) -> Result<PaymentSummary, redis::RedisError> {
+    ) -> Result<(String, String, String, String), redis::RedisError> {
         let from_ms = from.unwrap_or(0);
         let to_ms = to.unwrap_or(i64::MAX);
 
         let range_ms = to_ms - from_ms;
         let (granularity, divisor) = select_granularity(range_ms);
 
-        let default_result =
+        let (default_total, default_amount) =
             self.aggregate_category("default", granularity, from_ms, to_ms, divisor)?;
-        let fallback_result =
+
+        let (fallback_total, fallback_amount) =
             self.aggregate_category("fallback", granularity, from_ms, to_ms, divisor)?;
 
-        Ok(PaymentSummary {
-            default: default_result,
-            fallback: fallback_result,
-        })
+        Ok((
+            default_total,
+            default_amount,
+            fallback_total,
+            fallback_amount,
+        ))
     }
 
     #[inline]
@@ -148,30 +122,22 @@ impl Service<'static> {
         from_ms: i64,
         to_ms: i64,
         divisor: i64,
-    ) -> Result<ProcessorSummary, redis::RedisError> {
+    ) -> Result<(String, String), redis::RedisError> {
         self.conn.with_conn(|conn| {
             let pattern = format!("p:{granularity}:*:{category}");
 
-            let result: Vec<String> = AGGREGATE_SCRIPT
+            let (total_requests, mut total_amount): (String, String) = AGGREGATE_SCRIPT
                 .arg(&pattern)
                 .arg(from_ms / divisor)
                 .arg(to_ms / divisor)
                 .invoke(conn)?;
 
-            let total_requests = result
-                .first()
-                .and_then(|s| s.parse::<i64>().ok())
-                .unwrap_or(0);
+            let len = total_amount.len();
+            if len > 2 {
+                total_amount.insert(len - 2, '.');
+            }
 
-            let total_amount = result
-                .get(1)
-                .and_then(|s| Decimal::from_str_exact(s).ok())
-                .unwrap_or_else(|| Decimal::new(0, 2));
-
-            Ok(ProcessorSummary {
-                total_requests,
-                total_amount,
-            })
+            Ok((total_requests, total_amount))
         })
     }
 
@@ -227,7 +193,7 @@ fn parse_rfc3339_to_millis(date_str: &str) -> Option<i64> {
 }
 
 #[inline]
-fn test_queue_payment(
+fn queue_payment(
     conn: &RedisConnection<'static>,
     correlation_id: String,
     amount: String,

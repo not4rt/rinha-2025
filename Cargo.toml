@@ -14,7 +14,7 @@ mimalloc = { version = "0.1", default-features = false }
 may = { version = "0.3", default-features = false }
 may_minihttp = { version = "0.1", default-features = false }
 # uuid = { version = "1.17.0" }
-rust_decimal = { version = "1.37.2" }
+# rust_decimal = { version = "1.37.2" }
 chrono = "0.4.41"
 ureq = "3.0.12"
 # serde = { version = "1.0.219", features = ["derive"] }
