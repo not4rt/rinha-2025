@@ -6,6 +6,8 @@ use std::time::Duration;
 use may::go;
 use may_minihttp::HttpServiceFactory;
 
+use crate::worker::ProcessingSuccess;
+
 mod models;
 mod redis_pool;
 mod server;
@@ -21,22 +23,32 @@ fn start_workers(
         let _ = go!(
             may::coroutine::Builder::new()
                 .name(format!("worker-{i}"))
-                .stack_size(0x4000),
+                .stack_size(0x2000),
             move || {
                 println!("Worker {i} started");
 
-                let pool = redis_pool::RedisPool::new(redis_url, 1);
+                let pool = redis_pool::RedisPool::new(redis_url, 6);
                 let mut worker = worker::Worker::new(pool, default_url, fallback_url);
 
                 loop {
                     match worker.process_batch() {
-                        Ok(0) => {
-                            may::coroutine::sleep(Duration::from_millis(50));
+                        // Ok(0) => {
+                        //     // println!("Worker {i}: Processed 0 payments");
+                        //     may::coroutine::sleep(Duration::from_millis(50));
+                        // }
+                        // Ok(n) => {
+                        //     // println!("Worker {i}: Processed {n} payments");
+                        //     if n > 100 {
+                        //         println!("Worker {i}: Processed {n} payments");
+                        //     }
+                        // }
+                        Ok(ProcessingSuccess::PaymentsProcessed) => {
+                            // println!("Worker {i}: Processed {n} payments");
+                            // may::coroutine::sleep(Duration::from_millis(10));
                         }
-                        Ok(n) => {
-                            if n > 100 {
-                                println!("Worker {i}: Processed {n} payments");
-                            }
+                        Ok(ProcessingSuccess::NoPayments) => {
+                            // println!("Worker {i}: Processed 0 payments");
+                            may::coroutine::sleep(Duration::from_millis(50));
                         }
                         Err(e) => {
                             eprintln!("Worker {i} error: {e:?}");
