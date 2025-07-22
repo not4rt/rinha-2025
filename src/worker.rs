@@ -1,8 +1,7 @@
 use chrono::Utc;
-use may::sync::mpsc::{Receiver, Sender, channel};
+use may::sync::mpsc::channel;
 use smallvec::SmallVec;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use ureq::Agent;
 use ureq::http::header::CONTENT_TYPE;
