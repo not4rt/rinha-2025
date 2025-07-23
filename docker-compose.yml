@@ -52,7 +52,7 @@ services:
       resources:
         limits:
           memory: 50M
-          cpus: "0.3"
+          cpus: "0.2"
 
   backend2:
     build: .
@@ -153,7 +153,7 @@ services:
       resources:
         limits:
           memory: 25M # valkey is using less than 15mb when uncapped:o
-          cpus: "0.2"
+          cpus: "0.3"
 
 networks:
   backend:
