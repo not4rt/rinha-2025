@@ -65,11 +65,11 @@ impl Worker {
         let mut successful_payments = 0;
 
         for payment_json in payments {
-            let (timestamp_ms, json_str, amount_str) = parse_payment_data(&payment_json);
+            let (timestamp_ms, json_str, amount) = parse_payment_data(&payment_json);
 
             loop {
                 if let Ok(processor) = self.send_payment_with_fallback(json_str) {
-                    aggregate_payment(&conn, timestamp_ms, amount_str, processor)?;
+                    aggregate_payment(&conn, timestamp_ms, &amount, processor)?;
 
                     successful_payments += 1;
                     break;
@@ -198,7 +198,7 @@ fn aggregate_payment(
 // }
 
 #[inline(always)]
-fn parse_payment_data(data: &str) -> (i64, &str, &str) {
+fn parse_payment_data(data: &str) -> (i64, &str, String) {
     let pipe_pos = unsafe { data.find('|').unwrap_unchecked() };
 
     // Parse timestamp
@@ -220,6 +220,29 @@ fn parse_payment_data(data: &str) -> (i64, &str, &str) {
             .unwrap_unchecked()
     };
     let amount_str = &json_str[amount_start..amount_end];
+    let mut amount_result = String::with_capacity(amount_str.len() + 2);
+    let parts: Vec<&str> = amount_str.split('.').collect();
 
-    (timestamp_ms, json_str, amount_str)
+    match parts.as_slice() {
+        [whole] => {
+            amount_result.push_str(whole);
+            amount_result.push_str("00");
+        }
+        [whole, decimal] if decimal.len() == 1 => {
+            amount_result.push_str(whole);
+            amount_result.push_str(decimal);
+            amount_result.push('0');
+        }
+        [whole, decimal] if decimal.len() >= 2 => {
+            amount_result.push_str(whole);
+            amount_result.push_str(&decimal[..2]);
+        }
+        [whole, _] => {
+            amount_result.push_str(whole);
+            amount_result.push_str("00");
+        }
+        _ => unreachable!(),
+    }
+
+    (timestamp_ms, json_str, amount_result)
 }
