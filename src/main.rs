@@ -6,7 +6,7 @@ use std::time::Duration;
 use may::go;
 use may_minihttp::HttpServiceFactory;
 
-use crate::worker::ProcessingSuccess;
+use crate::worker::{ProcessingSuccess, WORKER_POOL_SIZE};
 
 mod models;
 mod redis_pool;
@@ -27,7 +27,7 @@ fn start_workers(
             move || {
                 println!("Worker {i} started");
 
-                let pool = redis_pool::RedisPool::new(redis_url, 6);
+                let pool = redis_pool::RedisPool::new(redis_url, num_workers * WORKER_POOL_SIZE);
                 let mut worker = worker::Worker::new(pool, default_url, fallback_url);
 
                 loop {
