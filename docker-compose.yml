@@ -52,7 +52,7 @@ services:
       resources:
         limits:
           memory: 50M
-          cpus: "0.4"
+          cpus: "0.3"
 
   backend2:
     build: .
@@ -76,7 +76,7 @@ services:
       resources:
         limits:
           memory: 50M
-          cpus: "0.4"
+          cpus: "0.3"
 
   worker1:
     build: .
@@ -100,7 +100,31 @@ services:
       resources:
         limits:
           memory: 40M
-          cpus: "0.3"
+          cpus: "0.2"
+
+  worker2:
+    build: .
+    environment:
+      PORT: 8080
+      DEFAULT_PROCESSOR_URL: http://payment-processor-default:8080
+      FALLBACK_PROCESSOR_URL: http://payment-processor-fallback:8080
+      REDIS_URL: redis://valkey
+    depends_on:
+      - valkey
+    networks:
+      - backend
+      - payment-processor
+    restart: unless-stopped
+    command: >
+      sh -c "
+      ./rust_coroutines_rinha_2025
+      --workers
+      "
+    deploy:
+      resources:
+        limits:
+          memory: 40M
+          cpus: "0.2"
 
   valkey:
     image: valkey/valkey:latest
@@ -129,7 +153,7 @@ services:
       resources:
         limits:
           memory: 25M # valkey is using less than 15mb when uncapped:o
-          cpus: "0.2"
+          cpus: "0.3"
 
 networks:
   backend:

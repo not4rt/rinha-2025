@@ -12,7 +12,7 @@ use crate::redis_pool::{FETCH_BATCH_SCRIPT, PROCESS_PAYMENT_SCRIPT, RedisPool, f
 
 const BATCH_SIZE: usize = 7000;
 const MAX_LATENCY_THRESHOLD: u64 = 5000;
-pub const WORKER_POOL_SIZE: usize = 10;
+pub const WORKER_POOL_SIZE: usize = 4;
 
 const JSON_CONTENT_TYPE: ureq::http::HeaderValue =
     ureq::http::HeaderValue::from_static("application/json");
