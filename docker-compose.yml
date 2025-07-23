@@ -76,7 +76,7 @@ services:
       resources:
         limits:
           memory: 50M
-          cpus: "0.3"
+          cpus: "0.2"
 
   worker1:
     build: .
@@ -100,7 +100,7 @@ services:
       resources:
         limits:
           memory: 40M
-          cpus: "0.2"
+          cpus: "0.3"
 
   worker2:
     build: .
