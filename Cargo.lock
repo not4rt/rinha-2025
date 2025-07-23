@@ -726,6 +726,7 @@ version = "1.0.4"
 dependencies = [
  "bytes",
  "chrono",
+ "crossbeam",
  "itoa",
  "log",
  "may",

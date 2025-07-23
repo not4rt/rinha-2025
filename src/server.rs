@@ -75,7 +75,6 @@ impl Service<'static> {
         }
     }
 
-    #[inline]
     fn handle_purge(&mut self, _req: Request, rsp: &mut Response) {
         match self.purge_payments() {
             Ok(_) => {
@@ -141,7 +140,6 @@ impl Service<'static> {
         })
     }
 
-    #[inline]
     fn purge_payments(&self) -> Result<(), redis::RedisError> {
         self.conn.with_conn(|conn| {
             let patterns = vec!["p:ms:*", "p:s:*", "p:m:*", "p:h:*", "payments:queue"];

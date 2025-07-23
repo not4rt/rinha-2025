@@ -16,3 +16,4 @@ Implementação da [**Rinha de Backend 2025**](https://github.com/zanfranceschi/
 - [X] Aprender sobre performance tunning no postgres
 - [X] Aprender sobre performance tunning no haproxy
 - [X] Aprender sobre rust channels
+- [] Aprender sobre raw pointers em rust e tentar um approach com unsafe no worker
