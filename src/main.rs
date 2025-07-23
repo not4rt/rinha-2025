@@ -6,8 +6,6 @@ use std::time::Duration;
 use may::go;
 use may_minihttp::HttpServiceFactory;
 
-use crate::worker::{ProcessingSuccess, WORKER_POOL_SIZE};
-
 mod models;
 mod redis_pool;
 mod server;
@@ -27,29 +25,29 @@ fn start_workers(
             move || {
                 println!("Worker {i} started");
 
-                let pool = redis_pool::RedisPool::new(redis_url, num_workers * WORKER_POOL_SIZE);
+                let pool = redis_pool::RedisPool::new(redis_url, num_workers);
                 let mut worker = worker::Worker::new(pool, default_url, fallback_url);
 
                 loop {
                     match worker.process_batch() {
-                        // Ok(0) => {
-                        //     // println!("Worker {i}: Processed 0 payments");
-                        //     may::coroutine::sleep(Duration::from_millis(50));
-                        // }
-                        // Ok(n) => {
-                        //     // println!("Worker {i}: Processed {n} payments");
-                        //     if n > 100 {
-                        //         println!("Worker {i}: Processed {n} payments");
-                        //     }
-                        // }
-                        Ok(ProcessingSuccess::PaymentsProcessed) => {
-                            // println!("Worker {i}: Processed {n} payments");
-                            // may::coroutine::sleep(Duration::from_millis(10));
-                        }
-                        Ok(ProcessingSuccess::NoPayments) => {
+                        Ok(0) => {
                             // println!("Worker {i}: Processed 0 payments");
                             may::coroutine::sleep(Duration::from_millis(50));
                         }
+                        Ok(n) => {
+                            // println!("Worker {i}: Processed {n} payments");
+                            if n > 100 {
+                                println!("Worker {i}: Processed {n} payments");
+                            }
+                        }
+                        // Ok(ProcessingSuccess::PaymentsProcessed) => {
+                        //     // println!("Worker {i}: Processed {n} payments");
+                        //     // may::coroutine::sleep(Duration::from_millis(10));
+                        // }
+                        // Ok(ProcessingSuccess::NoPayments) => {
+                        //     // println!("Worker {i}: Processed 0 payments");
+                        //     may::coroutine::sleep(Duration::from_millis(50));
+                        // }
                         Err(e) => {
                             eprintln!("Worker {i} error: {e:?}");
                             may::coroutine::sleep(Duration::from_millis(100));

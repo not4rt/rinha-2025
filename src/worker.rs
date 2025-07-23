@@ -1,8 +1,5 @@
 use chrono::Utc;
-use crossbeam::queue::SegQueue;
-// use may::sync::mpmc::channel; // crossbeam performed better than may channels
 use smallvec::SmallVec;
-use std::sync::Arc;
 use std::time::Duration;
 use ureq::Agent;
 use ureq::http::header::CONTENT_TYPE;
@@ -10,9 +7,8 @@ use ureq::http::header::CONTENT_TYPE;
 use crate::models::Processor;
 use crate::redis_pool::{FETCH_BATCH_SCRIPT, PROCESS_PAYMENT_SCRIPT, RedisPool, format_time_key};
 
-const BATCH_SIZE: usize = 7000;
+const BATCH_SIZE: i64 = 3000; // Max is 7000 because we are using unpack in the redis script
 const MAX_LATENCY_THRESHOLD: u64 = 5000;
-pub const WORKER_POOL_SIZE: usize = 4;
 
 const JSON_CONTENT_TYPE: ureq::http::HeaderValue =
     ureq::http::HeaderValue::from_static("application/json");
@@ -21,18 +17,11 @@ const JSON_CONTENT_TYPE: ureq::http::HeaderValue =
 pub enum ProcessingError {
     RedisError(String),
     ProcessorUnavailable,
-    // BothProcessorsUnavailable,
-    AlreadyProcessed,
-}
-
-#[derive(Debug)]
-pub enum ProcessingSuccess {
-    NoPayments,
-    PaymentsProcessed,
+    BothProcessorsUnavailable,
 }
 
 pub struct Worker {
-    pool: Arc<RedisPool>,
+    pool: RedisPool,
     default_url: &'static str,
     fallback_url: &'static str,
     agent: Agent,
@@ -48,7 +37,7 @@ impl Worker {
             .into();
 
         Self {
-            pool: Arc::new(pool),
+            pool,
             default_url: [default_url, "/payments"].concat().leak(),
             fallback_url: [fallback_url, "/payments"].concat().leak(),
             agent,
@@ -56,7 +45,7 @@ impl Worker {
     }
 
     #[inline(always)]
-    pub fn process_batch(&mut self) -> Result<ProcessingSuccess, ProcessingError> {
+    pub fn process_batch(&mut self) -> Result<usize, ProcessingError> {
         let conn = self.pool.get_connection(0);
 
         let now_ms = Utc::now().timestamp_millis();
@@ -70,144 +59,87 @@ impl Worker {
         })?;
 
         if payments.is_empty() {
-            return Ok(ProcessingSuccess::NoPayments);
+            return Ok(0);
         }
 
-        // MPMC channel approach
-        // let (tx, rx) = channel::<Option<String>>();
+        let mut successful_payments = 0;
 
-        // CrossBeam approach
-        let work_queue = Arc::new(SegQueue::new());
-        for payment in payments {
-            work_queue.push(payment);
-        }
+        for payment_json in payments {
+            let (timestamp_ms, json_str, amount_str) = parse_payment_data(&payment_json);
 
-        let mut worker_handles = Vec::with_capacity(WORKER_POOL_SIZE);
+            loop {
+                if let Ok(processor) = self.send_payment_with_fallback(json_str) {
+                    aggregate_payment(&conn, timestamp_ms, amount_str, processor)?;
 
-        for worker_id in 0..WORKER_POOL_SIZE {
-            let queue = Arc::clone(&work_queue);
-            // let rx = rx.clone();
-            let conn = self.pool.get_connection(worker_id);
-            let default_url = self.default_url;
-            let fallback_url = self.fallback_url;
-            let agent = self.agent.clone();
-
-            let handle = may::go!(move || {
-                while let Some(payment_json) = queue.pop() {
-                    if let Err(e) = process_payment_task(
-                        &payment_json,
-                        &conn,
-                        &agent,
-                        default_url,
-                        fallback_url,
-                    ) {
-                        eprintln!("Worker {worker_id}: {e:?}");
-                    }
+                    successful_payments += 1;
+                    break;
                 }
-            });
-
-            worker_handles.push(handle);
-        }
-
-        // MPMC channel approach
-        // drop(rx);
-        // for payment_json in payments {
-        //     tx.send(Some(payment_json)).ok();
-        // }
-        // for _ in 0..WORKER_POOL_SIZE {
-        //     tx.send(None).ok();
-        // }
-
-        for handle in worker_handles {
-            handle.join().ok();
-        }
-
-        Ok(ProcessingSuccess::PaymentsProcessed)
-    }
-}
-
-#[inline(always)]
-fn process_payment_task(
-    payment_json: &str,
-    conn: &crate::redis_pool::RedisConnection<'static>,
-    agent: &Agent,
-    default_url: &str,
-    fallback_url: &str,
-) -> Result<(), ProcessingError> {
-    let pipe_pos = match payment_json.find('|') {
-        Some(p) => p,
-        None => return Err(ProcessingError::RedisError("Invalid payment format".into())),
-    };
-
-    let json_str = &payment_json[pipe_pos + 1..];
-
-    let amount_str = match extract_amount(json_str) {
-        Some(amt) => amt,
-        None => return Err(ProcessingError::RedisError("Invalid amount".into())),
-    };
-
-    let timestamp_ms: i64 = match payment_json[..pipe_pos].parse() {
-        Ok(ts) => ts,
-        Err(_) => return Err(ProcessingError::RedisError("Invalid timestamp".into())),
-    };
-
-    let processor = send_payment_with_fallback(agent, default_url, fallback_url, json_str)?;
-    aggregate_payment(conn, timestamp_ms, amount_str, processor)
-}
-
-#[inline(always)]
-fn extract_amount(json_str: &str) -> Option<&str> {
-    let amount_key = "\"amount\":";
-    let start = json_str.find(amount_key)? + amount_key.len();
-    let end_chars = &json_str[start..];
-    let end = end_chars.find([',', '}'])?;
-    Some(&end_chars[..end])
-}
-
-#[inline(always)]
-fn send_payment_with_fallback(
-    agent: &Agent,
-    default_url: &str,
-    fallback_url: &str,
-    json_str: &str,
-) -> Result<Processor, ProcessingError> {
-    loop {
-        match send_payment(agent, default_url, json_str) {
-            Ok(_) => return Ok(Processor::Default),
-            Err(ProcessingError::AlreadyProcessed) => {
-                return Err(ProcessingError::AlreadyProcessed);
             }
-            Err(_) => {}
+
+            // match self.send_payment_with_fallback(&processor_payment) {
+            //     Ok(processor) => {
+            //         aggregate_payment(&conn, &queued_payment, processor)?;
+
+            //         successful_payments += 1;
+            //     }
+            //     Err(_) => {
+            //         requeue_failed_payments(
+            //             &conn,
+            //             &mut failed_payments,
+            //             payments_iter,
+            //             queued_payment,
+            //             payment_json,
+            //         )?;
+
+            //         return Err(ProcessingError::BothProcessorsUnavailable);
+            //     }
+            // }
         }
 
-        match send_payment(agent, fallback_url, json_str) {
-            Ok(_) => return Ok(Processor::Fallback),
-            Err(ProcessingError::AlreadyProcessed) => {
-                return Err(ProcessingError::AlreadyProcessed);
+        Ok(successful_payments)
+    }
+
+    #[inline(always)]
+    fn send_payment_with_fallback(
+        &mut self,
+        payment_json: &str,
+    ) -> Result<Processor, ProcessingError> {
+        if self.send_payment(self.default_url, payment_json).is_ok() {
+            return Ok(Processor::Default);
+        }
+
+        if self.send_payment(self.fallback_url, payment_json).is_ok() {
+            return Ok(Processor::Fallback);
+        }
+
+        Err(ProcessingError::BothProcessorsUnavailable)
+    }
+
+    #[inline(always)]
+    fn send_payment(&self, url: &str, buffer: &str) -> Result<(), ProcessingError> {
+        match self
+            .agent
+            .post(url)
+            .header(CONTENT_TYPE, JSON_CONTENT_TYPE)
+            .send(buffer)
+        {
+            Ok(resp) if resp.status().is_success() => Ok(()),
+            Ok(resp) if resp.status().as_u16() == 422 => {
+                eprintln!("Payment already processed. url={url} - buffer={buffer}");
+                Ok(())
             }
-            Err(_) => {}
+            Ok(_) => {
+                // eprintln!("Response error. url={url} - buffer={buffer} - resp={resp:?}");
+                Err(ProcessingError::ProcessorUnavailable)
+            }
+            Err(e) => {
+                eprintln!("Request error. url={url} - buffer={buffer} - error={e:?}");
+                Err(ProcessingError::ProcessorUnavailable)
+            }
         }
-
-        may::coroutine::yield_now();
-        // may::coroutine::sleep(Duration::from_millis(50));
     }
 }
 
-#[inline(always)]
-fn send_payment(agent: &Agent, url: &str, json_str: &str) -> Result<(), ProcessingError> {
-    match agent
-        .post(url)
-        .header(CONTENT_TYPE, JSON_CONTENT_TYPE)
-        .send(json_str)
-    {
-        Ok(resp) if resp.status().is_success() => Ok(()),
-        Ok(resp) if resp.status().as_u16() == 422 => Err(ProcessingError::AlreadyProcessed),
-        Ok(_) => Err(ProcessingError::ProcessorUnavailable),
-        Err(_) => Err(ProcessingError::ProcessorUnavailable),
-    }
-}
-
-#[inline(always)]
 fn aggregate_payment(
     conn: &crate::redis_pool::RedisConnection<'static>,
     timestamp_ms: i64,
@@ -215,9 +147,6 @@ fn aggregate_payment(
     processor: Processor,
 ) -> Result<(), ProcessingError> {
     let category = processor.as_str();
-
-    let amount_final = process_amount(amount_str);
-
     conn.with_conn(|conn| {
         let mut keys = SmallVec::<[String; 4]>::new();
         keys.push(format_time_key(timestamp_ms, category, "ms"));
@@ -230,39 +159,67 @@ fn aggregate_payment(
             .key(&keys[1])
             .key(&keys[2])
             .key(&keys[3])
-            .arg(&amount_final)
+            .arg(amount_str)
             .invoke(conn)
             .map_err(|e| ProcessingError::RedisError(e.to_string()))?;
-        Ok(())
-    })
+        Ok::<(), ProcessingError>(())
+    })?;
+    Ok(())
 }
 
+// fn requeue_failed_payments(
+//     conn: &crate::redis_pool::RedisConnection<'static>,
+//     failed_payments: &mut Vec<(String, i64)>,
+//     payments_iter: std::slice::Iter<'_, String>,
+//     queued_payment: QueuedPayment<'_>,
+//     payment_json: &str,
+// ) -> Result<(), ProcessingError> {
+//     failed_payments.push((*payment_json, queued_payment.requested_at + 5000));
+//     for remaining_json in payments_iter {
+//         if let Ok(remaining_payment) = serde_json::from_str::<QueuedPayment>(remaining_json) {
+//             failed_payments.push((
+//                 remaining_json.clone(),
+//                 remaining_payment.requested_at + 5000,
+//             ));
+//         }
+//     }
+//     Ok(if !failed_payments.is_empty() {
+//         conn.with_conn(|conn| {
+//             let mut pipeline = redis::Pipeline::new();
+//             for (payment_data, score) in &*failed_payments {
+//                 pipeline.zadd("payments:queue", payment_data, score);
+//             }
+//             let _: () = pipeline
+//                 .query(conn)
+//                 .map_err(|_| ProcessingError::RedisError)?;
+//             Ok::<(), ProcessingError>(())
+//         })?;
+//     })
+// }
+
 #[inline(always)]
-fn process_amount(amount_str: &str) -> String {
-    let mut result = String::with_capacity(amount_str.len() + 2);
+fn parse_payment_data(data: &str) -> (i64, &str, &str) {
+    let pipe_pos = unsafe { data.find('|').unwrap_unchecked() };
 
-    let parts: Vec<&str> = amount_str.split('.').collect();
+    // Parse timestamp
+    let timestamp_ms = unsafe { data[..pipe_pos].parse::<i64>().unwrap_unchecked() };
 
-    match parts.as_slice() {
-        [whole] => {
-            result.push_str(whole);
-            result.push_str("00");
-        }
-        [whole, decimal] if decimal.len() == 1 => {
-            result.push_str(whole);
-            result.push_str(decimal);
-            result.push('0');
-        }
-        [whole, decimal] if decimal.len() >= 2 => {
-            result.push_str(whole);
-            result.push_str(&decimal[..2]);
-        }
-        [whole, _] => {
-            result.push_str(whole);
-            result.push_str("00");
-        }
-        _ => unreachable!(),
-    }
+    // Get JSON part
+    let json_str = &data[pipe_pos + 1..];
 
-    result
+    let amount_start = unsafe {
+        json_str
+            .find("\"amount\":")
+            .map(|i| i + 9)
+            .unwrap_unchecked()
+    };
+    let amount_end = unsafe {
+        json_str[amount_start..]
+            .find([',', '}'])
+            .map(|i| amount_start + i)
+            .unwrap_unchecked()
+    };
+    let amount_str = &json_str[amount_start..amount_end];
+
+    (timestamp_ms, json_str, amount_str)
 }
