@@ -13,7 +13,6 @@ services:
     networks:
       - backend
       - payment-processor
-    cpuset: "3-4"
     cap_add:
       - IPC_LOCK
       - SYS_NICE
