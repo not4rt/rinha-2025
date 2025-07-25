@@ -1,31 +1,3 @@
-// use rust_decimal::Decimal;
-// use serde::{Deserialize, Serialize};
-// use uuid::Uuid;
-
-// pub struct PaymentRequest {
-//     pub correlation_id: Uuid,
-//     pub amount: Decimal,
-// }
-
-// #[derive(Serialize, Deserialize)]
-// pub struct ProcessorPayment<'a> {
-//     #[serde(rename = "correlationId")]
-//     pub correlation_id: Uuid,
-//     pub amount: Decimal,
-//     #[serde(rename = "requestedAt")]
-//     pub requested_at: &'a str,
-// }
-
-// pub struct PaymentSummary<'a> {
-//     pub default: &'a ProcessorSummary<'a>,
-//     pub fallback: &'a ProcessorSummary<'a>,
-// }
-
-// pub struct ProcessorSummary<'a> {
-//     pub total_requests: &'a str,
-//     pub total_amount: &'a str,
-// }
-
 pub enum Processor {
     Default,
     Fallback,
@@ -40,13 +12,3 @@ impl Processor {
         }
     }
 }
-
-// #[derive(Serialize, Deserialize)]
-// pub struct QueuedPayment<'a> {
-//     pub id: &'a str,
-//     #[serde(rename = "correlationId")]
-//     pub correlation_id: Uuid,
-//     pub amount: Decimal,
-//     #[serde(rename = "requestedAt")]
-//     pub requested_at: i64, // milliseconds
-// }

@@ -1,19 +1,8 @@
 services:
   haproxy:
     image: haproxy:latest
-    command: >
-      sh -c "
-      echo 'global
-        maxconn 5000
-      frontend api_frontend
-        bind *:80
-        default_backend api_backend
-      backend api_backend
-        balance static-rr
-        server backend1 backend1:8080
-        server backend2 backend2:8080
-        default-server init-addr none' > /tmp/haproxy.cfg &&
-      haproxy -f /tmp/haproxy.cfg"
+    volumes:
+      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
     ports:
       - "9999:80"
     depends_on:
@@ -24,6 +13,10 @@ services:
     networks:
       - backend
       - payment-processor
+    cpuset: "3-4"
+    cap_add:
+      - IPC_LOCK
+      - SYS_NICE
     deploy:
       resources:
         limits:
@@ -34,8 +27,8 @@ services:
     build: .
     environment:
       PORT: 8080
-      DEFAULT_PROCESSOR_URL: http://payment-processor-default:8080
-      FALLBACK_PROCESSOR_URL: http://payment-processor-fallback:8080
+      DEFAULT_PROCESSOR_URL: payment-processor-default:8080
+      FALLBACK_PROCESSOR_URL: payment-processor-fallback:8080
       REDIS_URL: redis://valkey
     depends_on:
       - valkey
@@ -47,19 +40,24 @@ services:
       sh -c "
       ./rust_coroutines_rinha_2025
       --server
+      --workers
       "
+    cpuset: "0-1"
+    cap_add:
+      - IPC_LOCK
+      - SYS_NICE
     deploy:
       resources:
         limits:
           memory: 50M
-          cpus: "0.2"
+          cpus: "0.5"
 
   backend2:
     build: .
     environment:
       PORT: 8080
-      DEFAULT_PROCESSOR_URL: http://payment-processor-default:8080
-      FALLBACK_PROCESSOR_URL: http://payment-processor-fallback:8080
+      DEFAULT_PROCESSOR_URL: payment-processor-default:8080
+      FALLBACK_PROCESSOR_URL: payment-processor-fallback:8080
       REDIS_URL: redis://valkey
     depends_on:
       - valkey
@@ -71,60 +69,17 @@ services:
       sh -c "
       ./rust_coroutines_rinha_2025
       --server
+      --workers
       "
+    cpuset: "2-3"
+    cap_add:
+      - IPC_LOCK
+      - SYS_NICE
     deploy:
       resources:
         limits:
           memory: 50M
-          cpus: "0.2"
-
-  worker1:
-    build: .
-    environment:
-      PORT: 8080
-      DEFAULT_PROCESSOR_URL: http://payment-processor-default:8080
-      FALLBACK_PROCESSOR_URL: http://payment-processor-fallback:8080
-      REDIS_URL: redis://valkey
-    depends_on:
-      - valkey
-    networks:
-      - backend
-      - payment-processor
-    restart: unless-stopped
-    command: >
-      sh -c "
-      ./rust_coroutines_rinha_2025
-      --workers
-      "
-    deploy:
-      resources:
-        limits:
-          memory: 40M
-          cpus: "0.3"
-
-  worker2:
-    build: .
-    environment:
-      PORT: 8080
-      DEFAULT_PROCESSOR_URL: http://payment-processor-default:8080
-      FALLBACK_PROCESSOR_URL: http://payment-processor-fallback:8080
-      REDIS_URL: redis://valkey
-    depends_on:
-      - valkey
-    networks:
-      - backend
-      - payment-processor
-    restart: unless-stopped
-    command: >
-      sh -c "
-      ./rust_coroutines_rinha_2025
-      --workers
-      "
-    deploy:
-      resources:
-        limits:
-          memory: 40M
-          cpus: "0.3"
+          cpus: "0.5"
 
   valkey:
     image: valkey/valkey:latest

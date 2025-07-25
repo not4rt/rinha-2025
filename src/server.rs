@@ -1,15 +1,15 @@
 use chrono::{DateTime, Utc};
+use may::sync::mpmc::Sender;
 use may_minihttp::{HttpService, Request, Response};
 use redis::Commands;
 use std::io::{self, BufRead};
 
-use crate::redis_pool::{
-    AGGREGATE_SCRIPT, QUEUE_PAYMENT_SCRIPT, RedisConnection, select_granularity,
-};
+use crate::redis_pool::{AGGREGATE_SCRIPT, RedisConnection, select_granularity};
 
 #[derive(Clone)]
 pub struct Service<'a> {
     pub conn: RedisConnection<'a>,
+    pub tx: Sender<(String, i64)>,
 }
 
 impl HttpService for Service<'static> {
@@ -40,20 +40,13 @@ impl Service<'static> {
         let amount_end = body.len() - 1;
         let amount = unsafe { std::str::from_utf8_unchecked(&body[amount_start..amount_end]) };
 
-        let correlation_id = correlation_id.to_string();
-        let amount = amount.to_string();
-        let conn = self.conn;
-        may::go!(move || { queue_payment(&conn, correlation_id, amount) });
-
-        // match self.queue_payment(&payment) {
-        //     Ok(_) => {
-        //         rsp.status_code(202, "Accepted");
-        //     }
-        //     Err(e) => {
-        //         eprintln!("Redis error: {e}");
-        //         rsp.status_code(500, "Internal Server Error");
-        //     }
-        // }
+        let now = Utc::now();
+        let timestamp_ms = now.timestamp_millis();
+        let requested_at = now.to_rfc3339();
+        let payload = format!(
+            "{{\"correlationId\":\"{correlation_id}\",\"amount\":{amount},\"requestedAt\":\"{requested_at}\"}}"
+        );
+        self.tx.send((payload, timestamp_ms)).unwrap();
     }
 
     #[inline]
@@ -188,27 +181,4 @@ fn parse_rfc3339_to_millis(date_str: &str) -> Option<i64> {
     DateTime::parse_from_rfc3339(date_str)
         .ok()
         .map(|dt| dt.timestamp_millis())
-}
-
-#[inline]
-fn queue_payment(
-    conn: &RedisConnection<'static>,
-    correlation_id: String,
-    amount: String,
-) -> Result<(), redis::RedisError> {
-    conn.with_conn(|conn| {
-            let now = Utc::now();
-            let timestamp_ms = now.timestamp_millis();
-            let requested_at = now.to_rfc3339();
-
-            let payload = format!(
-                "{timestamp_ms}|{{\"correlationId\":\"{correlation_id}\",\"amount\":{amount},\"requestedAt\":\"{requested_at}\"}}"
-            );
-
-            QUEUE_PAYMENT_SCRIPT
-                .key("payments:queue")
-                .arg(&payload)
-                .arg(timestamp_ms)
-                .invoke(conn)
-        })
 }

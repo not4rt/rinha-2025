@@ -1,145 +1,165 @@
-use chrono::Utc;
+use may::sync::mpmc::Receiver;
 use smallvec::SmallVec;
+use std::sync::Arc;
 use std::time::Duration;
-use ureq::Agent;
-use ureq::http::header::CONTENT_TYPE;
 
 use crate::models::Processor;
-use crate::redis_pool::{FETCH_BATCH_SCRIPT, PROCESS_PAYMENT_SCRIPT, RedisPool, format_time_key};
+use crate::redis_pool::{PROCESS_PAYMENT_SCRIPT, RedisPool, format_time_key};
+use crate::tcp::ConnectionPool;
 
-const BATCH_SIZE: i64 = 3000; // Max is 7000 because we are using unpack in the redis script
-const MAX_LATENCY_THRESHOLD: u64 = 5000;
-
-const JSON_CONTENT_TYPE: ureq::http::HeaderValue =
-    ureq::http::HeaderValue::from_static("application/json");
+const WORKER_COROUTINES: usize = 1; // concurrent request agents
+const CONNECTION_POOL_SIZE: usize = 50; // per processor
 
 #[derive(Debug)]
 pub enum ProcessingError {
     RedisError(String),
     ProcessorUnavailable,
-    BothProcessorsUnavailable,
+    AlreadyProcessed,
+    NetworkError(String),
 }
 
 pub struct Worker {
-    pool: RedisPool,
-    default_url: &'static str,
-    fallback_url: &'static str,
-    agent: Agent,
+    pool: Arc<RedisPool>,
+    default_host: &'static str,
+    fallback_host: &'static str,
+    rx: Receiver<(String, i64)>,
 }
 
 impl Worker {
-    pub fn new(pool: RedisPool, default_url: &'static str, fallback_url: &'static str) -> Self {
-        let agent = Agent::config_builder()
-            .timeout_global(Some(Duration::from_millis(MAX_LATENCY_THRESHOLD)))
-            .http_status_as_error(false)
-            .user_agent("")
-            .build()
-            .into();
-
+    pub fn new(
+        pool: RedisPool,
+        default_url: &'static str,
+        fallback_url: &'static str,
+        rx: Receiver<(String, i64)>,
+    ) -> Self {
         Self {
-            pool,
-            default_url: [default_url, "/payments"].concat().leak(),
-            fallback_url: [fallback_url, "/payments"].concat().leak(),
-            agent,
+            pool: Arc::new(pool),
+            default_host: default_url,
+            fallback_host: fallback_url,
+            rx,
         }
     }
 
     #[inline(always)]
-    pub fn process_batch(&mut self) -> Result<usize, ProcessingError> {
-        let conn = self.pool.get_connection(0);
+    pub fn process_batch(&mut self) {
+        let default_pool = Arc::new(ConnectionPool::new(self.default_host, CONNECTION_POOL_SIZE));
+        let fallback_pool = Arc::new(ConnectionPool::new(
+            self.fallback_host,
+            CONNECTION_POOL_SIZE,
+        ));
 
-        let now_ms = Utc::now().timestamp_millis();
-        let payments = conn.with_conn(|conn| {
-            FETCH_BATCH_SCRIPT
-                .key("payments:queue")
-                .arg(BATCH_SIZE)
-                .arg(now_ms)
-                .invoke::<Vec<String>>(conn)
-                .map_err(|e| ProcessingError::RedisError(e.to_string()))
-        })?;
+        for worker_id in 0..WORKER_COROUTINES {
+            let pool = self.pool.clone();
+            let rx = self.rx.clone();
+            let default_pool = default_pool.clone();
+            let fallback_pool = fallback_pool.clone();
 
-        if payments.is_empty() {
-            return Ok(0);
-        }
+            may::go!(move || {
+                let conn = pool.get_connection(worker_id % num_cpus::get());
 
-        let mut successful_payments = 0;
-
-        for payment_json in payments {
-            let (timestamp_ms, json_str, amount) = parse_payment_data(&payment_json);
-
-            loop {
-                if let Ok(processor) = self.send_payment_with_fallback(json_str) {
-                    aggregate_payment(&conn, timestamp_ms, &amount, processor)?;
-
-                    successful_payments += 1;
-                    break;
+                loop {
+                    match rx.try_recv() {
+                        Ok((payment_json, timestamp_ms)) => {
+                            if let Err(e) = process_payment_task(
+                                payment_json,
+                                timestamp_ms,
+                                &conn,
+                                &default_pool,
+                                &fallback_pool,
+                            ) {
+                                eprintln!("Worker {worker_id}: {e:?}");
+                            }
+                        }
+                        Err(_) => {
+                            // No messages available, yield to other coroutines
+                            // may::coroutine::yield_now();
+                            may::coroutine::sleep(Duration::from_millis(3));
+                        }
+                    }
                 }
-            }
-
-            // match self.send_payment_with_fallback(&processor_payment) {
-            //     Ok(processor) => {
-            //         aggregate_payment(&conn, &queued_payment, processor)?;
-
-            //         successful_payments += 1;
-            //     }
-            //     Err(_) => {
-            //         requeue_failed_payments(
-            //             &conn,
-            //             &mut failed_payments,
-            //             payments_iter,
-            //             queued_payment,
-            //             payment_json,
-            //         )?;
-
-            //         return Err(ProcessingError::BothProcessorsUnavailable);
-            //     }
-            // }
-        }
-
-        Ok(successful_payments)
-    }
-
-    #[inline(always)]
-    fn send_payment_with_fallback(
-        &mut self,
-        payment_json: &str,
-    ) -> Result<Processor, ProcessingError> {
-        if self.send_payment(self.default_url, payment_json).is_ok() {
-            return Ok(Processor::Default);
-        }
-
-        if self.send_payment(self.fallback_url, payment_json).is_ok() {
-            return Ok(Processor::Fallback);
-        }
-
-        Err(ProcessingError::BothProcessorsUnavailable)
-    }
-
-    #[inline(always)]
-    fn send_payment(&self, url: &str, buffer: &str) -> Result<(), ProcessingError> {
-        match self
-            .agent
-            .post(url)
-            .header(CONTENT_TYPE, JSON_CONTENT_TYPE)
-            .send(buffer)
-        {
-            Ok(resp) if resp.status().is_success() => Ok(()),
-            Ok(resp) if resp.status().as_u16() == 422 => {
-                eprintln!("Payment already processed. url={url} - buffer={buffer}");
-                Ok(())
-            }
-            Ok(_) => {
-                // eprintln!("Response error. url={url} - buffer={buffer} - resp={resp:?}");
-                Err(ProcessingError::ProcessorUnavailable)
-            }
-            Err(e) => {
-                eprintln!("Request error. url={url} - buffer={buffer} - error={e:?}");
-                Err(ProcessingError::ProcessorUnavailable)
-            }
+            });
         }
     }
 }
 
+#[inline(always)]
+fn process_payment_task(
+    payment_json: String,
+    timestamp_ms: i64,
+    conn: &crate::redis_pool::RedisConnection<'static>,
+    default_pool: &Arc<ConnectionPool>,
+    fallback_pool: &Arc<ConnectionPool>,
+) -> Result<(), ProcessingError> {
+    let amount_str = match extract_amount(&payment_json) {
+        Some(amt) => amt,
+        None => return Err(ProcessingError::RedisError("Invalid amount".into())),
+    };
+
+    let processor = send_payment_with_fallback(default_pool, fallback_pool, &payment_json)?;
+
+    aggregate_payment(conn, timestamp_ms, amount_str, processor)
+}
+
+#[inline(always)]
+fn extract_amount(json_str: &str) -> Option<&str> {
+    let amount_key = "\"amount\":";
+    let start = json_str.find(amount_key)? + amount_key.len();
+    let end_chars = &json_str[start..];
+    let end = end_chars.find([',', '}'])?;
+    Some(&end_chars[..end])
+}
+
+#[inline(always)]
+fn send_payment_with_fallback(
+    default_pool: &Arc<ConnectionPool>,
+    fallback_pool: &Arc<ConnectionPool>,
+    json_str: &str,
+) -> Result<Processor, ProcessingError> {
+    loop {
+        if let Ok(mut conn) = default_pool.get_connection() {
+            match conn.send_payment(json_str) {
+                Ok(200) => {
+                    default_pool.return_connection(conn);
+                    return Ok(Processor::Default);
+                }
+                Ok(422) => {
+                    default_pool.return_connection(conn);
+                    return Err(ProcessingError::AlreadyProcessed);
+                }
+                Ok(_) => {
+                    // eprintln!("Default processor status: {status}");
+                }
+                Err(e) => {
+                    eprintln!("Default processor connection error: {e:?}");
+                }
+            }
+        }
+
+        // Try fallback processor
+        if let Ok(mut conn) = fallback_pool.get_connection() {
+            match conn.send_payment(json_str) {
+                Ok(200) => {
+                    fallback_pool.return_connection(conn);
+                    return Ok(Processor::Fallback);
+                }
+                Ok(422) => {
+                    fallback_pool.return_connection(conn);
+                    return Err(ProcessingError::AlreadyProcessed);
+                }
+                Ok(_) => {
+                    // eprintln!("Default processor status: {status}");
+                }
+                Err(e) => {
+                    eprintln!("Fallback processor connection error: {e:?}");
+                }
+            }
+        }
+
+        may::coroutine::sleep(Duration::from_millis(3));
+    }
+}
+
+#[inline(always)]
 fn aggregate_payment(
     conn: &crate::redis_pool::RedisConnection<'static>,
     timestamp_ms: i64,
@@ -147,6 +167,9 @@ fn aggregate_payment(
     processor: Processor,
 ) -> Result<(), ProcessingError> {
     let category = processor.as_str();
+
+    let amount_final = process_amount(amount_str);
+
     conn.with_conn(|conn| {
         let mut keys = SmallVec::<[String; 4]>::new();
         keys.push(format_time_key(timestamp_ms, category, "ms"));
@@ -159,90 +182,39 @@ fn aggregate_payment(
             .key(&keys[1])
             .key(&keys[2])
             .key(&keys[3])
-            .arg(amount_str)
+            .arg(&amount_final)
             .invoke(conn)
             .map_err(|e| ProcessingError::RedisError(e.to_string()))?;
-        Ok::<(), ProcessingError>(())
-    })?;
-    Ok(())
+        Ok(())
+    })
 }
 
-// fn requeue_failed_payments(
-//     conn: &crate::redis_pool::RedisConnection<'static>,
-//     failed_payments: &mut Vec<(String, i64)>,
-//     payments_iter: std::slice::Iter<'_, String>,
-//     queued_payment: QueuedPayment<'_>,
-//     payment_json: &str,
-// ) -> Result<(), ProcessingError> {
-//     failed_payments.push((*payment_json, queued_payment.requested_at + 5000));
-//     for remaining_json in payments_iter {
-//         if let Ok(remaining_payment) = serde_json::from_str::<QueuedPayment>(remaining_json) {
-//             failed_payments.push((
-//                 remaining_json.clone(),
-//                 remaining_payment.requested_at + 5000,
-//             ));
-//         }
-//     }
-//     Ok(if !failed_payments.is_empty() {
-//         conn.with_conn(|conn| {
-//             let mut pipeline = redis::Pipeline::new();
-//             for (payment_data, score) in &*failed_payments {
-//                 pipeline.zadd("payments:queue", payment_data, score);
-//             }
-//             let _: () = pipeline
-//                 .query(conn)
-//                 .map_err(|_| ProcessingError::RedisError)?;
-//             Ok::<(), ProcessingError>(())
-//         })?;
-//     })
-// }
-
 #[inline(always)]
-fn parse_payment_data(data: &str) -> (i64, &str, String) {
-    let pipe_pos = unsafe { data.find('|').unwrap_unchecked() };
+fn process_amount(amount_str: &str) -> String {
+    let mut result = String::with_capacity(amount_str.len() + 2);
 
-    // Parse timestamp
-    let timestamp_ms = unsafe { data[..pipe_pos].parse::<i64>().unwrap_unchecked() };
-
-    // Get JSON part
-    let json_str = &data[pipe_pos + 1..];
-
-    let amount_start = unsafe {
-        json_str
-            .find("\"amount\":")
-            .map(|i| i + 9)
-            .unwrap_unchecked()
-    };
-    let amount_end = unsafe {
-        json_str[amount_start..]
-            .find([',', '}'])
-            .map(|i| amount_start + i)
-            .unwrap_unchecked()
-    };
-    let amount_str = &json_str[amount_start..amount_end];
-    let mut amount_result = String::with_capacity(amount_str.len() + 2);
     let parts: Vec<&str> = amount_str.split('.').collect();
 
     match parts.as_slice() {
         [whole] => {
-            amount_result.push_str(whole);
-            amount_result.push_str("00");
+            result.push_str(whole);
+            result.push_str("00");
         }
         [whole, decimal] if decimal.len() == 1 => {
-            amount_result.push_str(whole);
-            amount_result.push_str(decimal);
-            amount_result.push('0');
+            result.push_str(whole);
+            result.push_str(decimal);
+            result.push('0');
         }
         [whole, decimal] if decimal.len() >= 2 => {
-            amount_result.push_str(whole);
-            amount_result.push_str(&decimal[..2]);
+            result.push_str(whole);
+            result.push_str(&decimal[..2]);
         }
         [whole, _] => {
-            amount_result.push_str(whole);
-            amount_result.push_str("00");
+            result.push_str(whole);
+            result.push_str("00");
         }
         _ => unreachable!(),
     }
 
-    (timestamp_ms, json_str, amount_result)
+    result
 }

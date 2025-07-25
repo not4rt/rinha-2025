@@ -3,20 +3,6 @@ use parking_lot::Mutex;
 use redis::{Connection, Script};
 use smallvec::SmallVec;
 
-// Lua script for queueing payment
-pub static QUEUE_PAYMENT_SCRIPT: Lazy<Script> = Lazy::new(|| {
-    Script::new(
-        r#"
-        local queue_key = KEYS[1]
-        local payment_data = ARGV[1]
-        local score = ARGV[2]
-
-        redis.call('ZADD', queue_key, score, payment_data)
-        return 1
-    "#,
-    )
-});
-
 // Lua script for atomic payment processing and aggregation
 pub static PROCESS_PAYMENT_SCRIPT: Lazy<Script> = Lazy::new(|| {
     Script::new(
@@ -52,26 +38,6 @@ pub static PROCESS_PAYMENT_SCRIPT: Lazy<Script> = Lazy::new(|| {
         end
 
         return 1
-    "#,
-    )
-});
-
-// Lua script for batch fetching from queue
-pub static FETCH_BATCH_SCRIPT: Lazy<Script> = Lazy::new(|| {
-    Script::new(
-        r#"
-        local queue_key = KEYS[1]
-        local batch_size = tonumber(ARGV[1])
-        local max_score = ARGV[2]
-
-        local payments = redis.call('ZRANGEBYSCORE', queue_key, '-inf', max_score, 'LIMIT', 0, batch_size)
-
-        if #payments > 0 then
-            -- Remove all at once using ZREM with multiple members
-            redis.call('ZREM', queue_key, unpack(payments))
-        end
-
-        return payments
     "#,
     )
 });
@@ -206,9 +172,7 @@ impl<'a> RedisConnection<'a> {
 }
 
 pub fn init_scripts() {
-    let _ = QUEUE_PAYMENT_SCRIPT;
     let _ = PROCESS_PAYMENT_SCRIPT;
-    let _ = FETCH_BATCH_SCRIPT;
     let _ = AGGREGATE_SCRIPT;
     println!("Redis scripts initialized");
 }

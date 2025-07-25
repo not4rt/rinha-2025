@@ -3,12 +3,16 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::time::Duration;
 
-use may::go;
+use may::{
+    go,
+    sync::mpmc::{Receiver, Sender},
+};
 use may_minihttp::HttpServiceFactory;
 
 mod models;
 mod redis_pool;
 mod server;
+mod tcp;
 mod worker;
 
 fn start_workers(
@@ -16,8 +20,11 @@ fn start_workers(
     redis_url: &'static str,
     default_url: &'static str,
     fallback_url: &'static str,
+    rx: Receiver<(String, i64)>,
 ) {
+    // let mut worker_handles = Vec::with_capacity(num_workers);
     for i in 0..num_workers {
+        let rx = rx.clone();
         let _ = go!(
             may::coroutine::Builder::new()
                 .name(format!("worker-{i}"))
@@ -26,41 +33,18 @@ fn start_workers(
                 println!("Worker {i} started");
 
                 let pool = redis_pool::RedisPool::new(redis_url, num_workers);
-                let mut worker = worker::Worker::new(pool, default_url, fallback_url);
-
-                loop {
-                    match worker.process_batch() {
-                        Ok(0) => {
-                            // println!("Worker {i}: Processed 0 payments");
-                            may::coroutine::sleep(Duration::from_millis(50));
-                        }
-                        Ok(n) => {
-                            // println!("Worker {i}: Processed {n} payments");
-                            if n > 100 {
-                                println!("Worker {i}: Processed {n} payments");
-                            }
-                        }
-                        // Ok(ProcessingSuccess::PaymentsProcessed) => {
-                        //     // println!("Worker {i}: Processed {n} payments");
-                        //     // may::coroutine::sleep(Duration::from_millis(10));
-                        // }
-                        // Ok(ProcessingSuccess::NoPayments) => {
-                        //     // println!("Worker {i}: Processed 0 payments");
-                        //     may::coroutine::sleep(Duration::from_millis(50));
-                        // }
-                        Err(e) => {
-                            eprintln!("Worker {i} error: {e:?}");
-                            may::coroutine::sleep(Duration::from_millis(100));
-                        }
-                    }
-                }
+                let mut worker = worker::Worker::new(pool, default_url, fallback_url, rx);
+                worker.process_batch()
             }
         );
+        // .unwrap();
+        // worker_handles.push(handle);
     }
 }
 
 struct HttpServer {
     redis_pool: redis_pool::RedisPool,
+    tx: Sender<(String, i64)>,
 }
 
 impl HttpServiceFactory for HttpServer {
@@ -68,7 +52,10 @@ impl HttpServiceFactory for HttpServer {
 
     fn new_service(&self, id: usize) -> Self::Service {
         let conn = self.redis_pool.get_connection(id);
-        server::Service { conn }
+        server::Service {
+            conn,
+            tx: self.tx.clone(),
+        }
     }
 }
 
@@ -99,6 +86,7 @@ fn main() {
 
     redis_pool::init_scripts();
 
+    let (tx, rx) = may::sync::mpmc::channel::<(String, i64)>();
     if mode_workers {
         println!("Starting workers...");
         start_workers(
@@ -106,6 +94,7 @@ fn main() {
             redis_url,
             default_processor_url,
             fallback_processor_url,
+            rx.clone(),
         );
     }
 
@@ -113,6 +102,7 @@ fn main() {
         println!("Starting HTTP server on port {port}");
         let server = HttpServer {
             redis_pool: redis_pool::RedisPool::new(redis_url, num_cpus),
+            tx: tx.clone(),
         };
 
         server
