@@ -128,9 +128,9 @@ impl HttpConnection {
 
     pub fn get_payments_summary(&mut self, raw_path: &str) -> Result<String, ProcessingError> {
         let path = if raw_path.contains('?') {
-            [raw_path, "&individual=true"].concat()
+            [raw_path, "&from_peer=true"].concat()
         } else {
-            [raw_path, "?individual=true"].concat()
+            [raw_path, "?from_peer=true"].concat()
         };
 
         let request = format!(
@@ -161,7 +161,7 @@ impl HttpConnection {
 
     pub fn purge_payments(&mut self) -> Result<(), ProcessingError> {
         let request = format!(
-            "DELETE /purge-payments HTTP/1.1\r\n\
+            "DELETE /purge-payments?from_peer=true HTTP/1.1\r\n\
              Host: {}\r\n\
              Connection: keep-alive\r\n\
              \r\n",
@@ -178,6 +178,7 @@ impl HttpConnection {
             .read(&mut response)
             .map_err(|e| ProcessingError::NetworkError(e.to_string()))?;
 
+        // empty or no response
         if n == 0 {
             return Err(ProcessingError::ProcessorUnavailable);
         }

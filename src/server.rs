@@ -54,9 +54,9 @@ impl Service {
     #[inline]
     fn handle_summary(&mut self, req: &Request, rsp: &mut Response) {
         let raw_path = req.path();
-        let (from_param, to_param, individual) = parse_date_params(raw_path);
+        let (from_param, to_param, from_peer) = parse_query_params(raw_path);
 
-        match self.get_aggregated_payment_summary(from_param, to_param, individual, raw_path) {
+        match self.get_aggregated_payment_summary(from_param, to_param, from_peer, raw_path) {
             Ok((default_total, default_amount, fallback_total, fallback_amount)) => {
                 let json = format!(
                     r#"{{"default":{{"totalRequests":{default_total},"totalAmount":{default_amount}}},"fallback":{{"totalRequests":{fallback_total},"totalAmount":{fallback_amount}}}}}"#
@@ -71,16 +71,21 @@ impl Service {
         }
     }
 
-    fn handle_purge(&mut self, _req: Request, rsp: &mut Response) {
+    fn handle_purge(&mut self, req: Request, rsp: &mut Response) {
         crate::memory_store::MEMORY_STORE.purge_all();
-        let backend_pool = ConnectionPool::new(self.peer_host, 1);
-        if let Ok(mut conn) = backend_pool.get_connection() {
-            match conn.purge_payments() {
-                Ok(()) => {
-                    println!("Purged backend payments");
-                }
-                Err(e) => {
-                    eprintln!("Backend purge error: {e:?}");
+
+        let from_peer = req.path().contains("from_peer=true");
+
+        if !from_peer {
+            let backend_pool = ConnectionPool::new(self.peer_host, 1);
+            if let Ok(mut conn) = backend_pool.get_connection() {
+                match conn.purge_payments() {
+                    Ok(()) => {
+                        println!("Purged backend payments");
+                    }
+                    Err(e) => {
+                        eprintln!("Backend purge error: {e:?}");
+                    }
                 }
             }
         }
@@ -92,14 +97,14 @@ impl Service {
         &self,
         from: Option<i64>,
         to: Option<i64>,
-        individual: bool,
+        from_peer: bool,
         raw_path: &str,
     ) -> Result<(String, String, String, String), Box<dyn std::error::Error>> {
         let (mut total_default_stats, mut total_fallback_stats) =
             crate::memory_store::MEMORY_STORE.get_summary(from, to);
 
         // get stats from peer
-        if !individual {
+        if !from_peer {
             let backend_pool = ConnectionPool::new(self.peer_host, 1);
             if let Ok(mut conn) = backend_pool.get_connection() {
                 match conn.get_payments_summary(raw_path) {
@@ -132,7 +137,7 @@ impl Service {
 }
 
 #[inline]
-fn parse_date_params(path: &str) -> (Option<i64>, Option<i64>, bool) {
+fn parse_query_params(path: &str) -> (Option<i64>, Option<i64>, bool) {
     let query_start = match path.find('?') {
         Some(pos) => pos + 1,
         None => return (None, None, false),
@@ -155,7 +160,7 @@ fn parse_date_params(path: &str) -> (Option<i64>, Option<i64>, bool) {
         }
     }
 
-    let bool = query.contains("individual=true");
+    let bool = query.contains("from_peer=true");
 
     (from, to, bool)
 }
