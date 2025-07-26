@@ -6,7 +6,7 @@ use crate::models::{Processor, process_amount_to_cents};
 use crate::tcp::ConnectionPool;
 
 const WORKER_COROUTINES: usize = 1; // concurrent request agents
-const CONNECTION_POOL_SIZE: usize = 50; // per processor
+const CONNECTION_POOL_SIZE: usize = 50; // per agent
 
 #[derive(Debug)]
 pub enum ProcessingError {
