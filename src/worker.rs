@@ -10,7 +10,6 @@ const CONNECTION_POOL_SIZE: usize = 50; // per agent
 
 #[derive(Debug)]
 pub enum ProcessingError {
-    RedisError(String),
     ProcessorUnavailable,
     AlreadyProcessed,
     NetworkError(String),
@@ -78,23 +77,21 @@ fn process_payment_task(
     default_pool: &Arc<ConnectionPool>,
     fallback_pool: &Arc<ConnectionPool>,
 ) -> Result<(), ProcessingError> {
-    let amount_str = match extract_amount(&payment_json) {
-        Some(amt) => amt,
-        None => return Err(ProcessingError::RedisError("Invalid amount".into())),
-    };
+    let amount_str = extract_amount(&payment_json);
 
     let processor = send_payment_with_fallback(default_pool, fallback_pool, &payment_json)?;
 
-    aggregate_payment(timestamp_ms, amount_str, processor)
+    aggregate_payment(timestamp_ms, amount_str, &processor);
+    Ok(())
 }
 
 #[inline(always)]
-fn extract_amount(json_str: &str) -> Option<&str> {
+fn extract_amount(json_str: &str) -> &str {
     let amount_key = "\"amount\":";
-    let start = json_str.find(amount_key)? + amount_key.len();
+    let start = unsafe { json_str.find(amount_key).unwrap_unchecked() } + amount_key.len();
     let end_chars = &json_str[start..];
-    let end = end_chars.find([',', '}'])?;
-    Some(&end_chars[..end])
+    let end = unsafe { end_chars.find([',', '}']).unwrap_unchecked() };
+    &end_chars[..end]
 }
 
 #[inline(always)]
@@ -116,8 +113,10 @@ fn send_payment_with_fallback(
                 }
                 Ok(_) => {
                     // eprintln!("Default processor status: {status}");
+                    default_pool.return_connection(conn);
                 }
                 Err(e) => {
+                    default_pool.return_connection(conn);
                     eprintln!("Default processor connection error: {e:?}");
                 }
             }
@@ -135,8 +134,10 @@ fn send_payment_with_fallback(
                 }
                 Ok(_) => {
                     // eprintln!("Default processor status: {status}");
+                    fallback_pool.return_connection(conn);
                 }
                 Err(e) => {
+                    fallback_pool.return_connection(conn);
                     eprintln!("Fallback processor connection error: {e:?}");
                 }
             }
@@ -150,12 +151,11 @@ fn send_payment_with_fallback(
 fn aggregate_payment(
     timestamp_ms: i64,
     amount_str: &str,
-    processor: Processor,
-) -> Result<(), ProcessingError> {
+    processor: &Processor,
+)  {
     let category = processor.as_str();
     let amount_cents = process_amount_to_cents(amount_str);
 
     crate::memory_store::MEMORY_STORE.record_payment(timestamp_ms, amount_cents, category);
 
-    Ok(())
 }

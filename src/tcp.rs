@@ -9,7 +9,7 @@ use std::{
 use crate::worker::ProcessingError;
 
 const MAX_LATENCY_THRESHOLD: u64 = 5000;
-const READ_BUFFER_SIZE: usize = 512;
+const READ_BUFFER_SIZE: usize = 256;
 
 pub struct HttpConnection {
     stream: TcpStream,

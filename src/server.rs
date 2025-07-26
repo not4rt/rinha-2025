@@ -12,6 +12,7 @@ pub struct Service {
 }
 
 impl HttpService for Service {
+    #[inline(always)]
     fn call(&mut self, req: Request, rsp: &mut Response) -> io::Result<()> {
         match req.path() {
             "/payments" => self.handle_payment(req, rsp),
@@ -19,7 +20,7 @@ impl HttpService for Service {
                 let start = std::time::Instant::now();
                 self.handle_summary(&req, rsp);
                 let elapsed = start.elapsed();
-                println!("Summary request processed in {} ms", elapsed.as_millis());
+                println!("Summary request processed in {} us", elapsed.as_micros());
             }
             "/purge-payments" => self.handle_purge(req, rsp),
             _ => {
@@ -31,7 +32,7 @@ impl HttpService for Service {
 }
 
 impl Service {
-    #[inline]
+    #[inline(always)]
     fn handle_payment(&mut self, req: Request, _rsp: &Response) {
         let mut body_reader = req.body();
         let body = unsafe { body_reader.fill_buf().unwrap_unchecked() };
@@ -51,7 +52,6 @@ impl Service {
         self.tx.send((payload, timestamp_ms)).unwrap();
     }
 
-    #[inline]
     fn handle_summary(&mut self, req: &Request, rsp: &mut Response) {
         let raw_path = req.path();
         let (from_param, to_param, from_peer) = parse_query_params(raw_path);
@@ -92,7 +92,6 @@ impl Service {
         rsp.status_code(200, "Ok");
     }
 
-    #[inline]
     fn get_aggregated_payment_summary(
         &self,
         from: Option<i64>,
@@ -136,7 +135,6 @@ impl Service {
     }
 }
 
-#[inline]
 fn parse_query_params(path: &str) -> (Option<i64>, Option<i64>, bool) {
     let query_start = match path.find('?') {
         Some(pos) => pos + 1,
@@ -165,21 +163,18 @@ fn parse_query_params(path: &str) -> (Option<i64>, Option<i64>, bool) {
     (from, to, bool)
 }
 
-#[inline]
 fn parse_rfc3339_to_millis(date_str: &str) -> Option<i64> {
     DateTime::parse_from_rfc3339(date_str)
         .ok()
         .map(|dt| dt.timestamp_millis())
 }
 
-#[inline]
 fn format_amount_from_cents(cents: u64) -> String {
     let whole = cents / 100;
     let decimal = cents % 100;
     format!("{whole}.{decimal:02}")
 }
 
-#[inline]
 fn extract_json_number<'a>(json: &'a str, key: &'a str) -> Option<&'a str> {
     let start = json.find(key)? + key.len();
     let end_chars = &json[start..];
@@ -187,7 +182,6 @@ fn extract_json_number<'a>(json: &'a str, key: &'a str) -> Option<&'a str> {
     Some(&end_chars[..end])
 }
 
-#[inline]
 fn parse_summary_response(response: &str) -> Option<(u64, u64, u64, u64)> {
     let body_start = response.find("\r\n\r\n")? + 4;
     let body = &response[body_start..];
