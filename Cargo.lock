@@ -738,7 +738,7 @@ dependencies = [
 
 [[package]]
 name = "rust_coroutines_rinha_2025"
-version = "1.0.5"
+version = "2.0.0"
 dependencies = [
  "bytes",
  "chrono",
