@@ -24,9 +24,6 @@ services:
     networks:
       - backend
       - payment-processor
-    cap_add:
-      - IPC_LOCK
-      - SYS_NICE
     deploy:
       resources:
         limits:
@@ -50,10 +47,6 @@ services:
       --server
       --workers
       "
-    cpuset: "0-1"
-    cap_add:
-      - IPC_LOCK
-      - SYS_NICE
     deploy:
       resources:
         limits:
@@ -77,10 +70,6 @@ services:
       --server
       --workers
       "
-    cpuset: "2-3"
-    cap_add:
-      - IPC_LOCK
-      - SYS_NICE
     deploy:
       resources:
         limits:
