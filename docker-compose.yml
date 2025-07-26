@@ -1,8 +1,19 @@
 services:
   haproxy:
     image: haproxy:latest
-    volumes:
-      - ./haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    command: >
+      sh -c "
+      echo 'global
+        maxconn 5000
+      frontend api_frontend
+        bind *:80
+        default_backend api_backend
+      backend api_backend
+        balance static-rr
+        server backend1 backend1:8080
+        server backend2 backend2:8080
+        default-server init-addr none' > /tmp/haproxy.cfg &&
+      haproxy -f /tmp/haproxy.cfg"
     ports:
       - "9999:80"
     depends_on:
@@ -20,7 +31,7 @@ services:
       resources:
         limits:
           memory: 25M
-          cpus: "0.2"
+          cpus: "0.3"
 
   backend1:
     build: .
@@ -28,9 +39,7 @@ services:
       PORT: 8080
       DEFAULT_PROCESSOR_URL: payment-processor-default:8080
       FALLBACK_PROCESSOR_URL: payment-processor-fallback:8080
-      REDIS_URL: redis://valkey
-    depends_on:
-      - valkey
+      PEER_HOST: backend2:8080
     networks:
       - backend
       - payment-processor
@@ -49,7 +58,7 @@ services:
       resources:
         limits:
           memory: 50M
-          cpus: "0.5"
+          cpus: "0.6"
 
   backend2:
     build: .
@@ -57,9 +66,7 @@ services:
       PORT: 8080
       DEFAULT_PROCESSOR_URL: payment-processor-default:8080
       FALLBACK_PROCESSOR_URL: payment-processor-fallback:8080
-      REDIS_URL: redis://valkey
-    depends_on:
-      - valkey
+      PEER_HOST: backend1:8080
     networks:
       - backend
       - payment-processor
@@ -78,36 +85,7 @@ services:
       resources:
         limits:
           memory: 50M
-          cpus: "0.5"
-
-  valkey:
-    image: valkey/valkey:latest
-    command: >
-      valkey-server
-      --save ""
-      --appendonly no
-      --io-threads 2
-      --maxmemory 20mb
-      --maxmemory-policy allkeys-lru
-      --tcp-keepalive 0
-      --timeout 0
-      --tcp-backlog 65535
-      --databases 1
-      --stop-writes-on-bgsave-error no
-      --rdbcompression no
-      --lazyfree-lazy-eviction yes
-      --lazyfree-lazy-expire yes
-      --lazyfree-lazy-server-del yes
-      --replica-lazy-flush yes
-    logging:
-      driver: "none"
-    networks:
-      - backend
-    deploy:
-      resources:
-        limits:
-          memory: 25M # valkey is using less than 15mb when uncapped:o
-          cpus: "0.3"
+          cpus: "0.6"
 
 networks:
   backend:

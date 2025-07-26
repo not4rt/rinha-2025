@@ -1,10 +1,8 @@
 use may::sync::mpmc::Receiver;
-use smallvec::SmallVec;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::models::Processor;
-use crate::redis_pool::{PROCESS_PAYMENT_SCRIPT, RedisPool, format_time_key};
+use crate::models::{Processor, process_amount_to_cents};
 use crate::tcp::ConnectionPool;
 
 const WORKER_COROUTINES: usize = 1; // concurrent request agents
@@ -19,7 +17,6 @@ pub enum ProcessingError {
 }
 
 pub struct Worker {
-    pool: Arc<RedisPool>,
     default_host: &'static str,
     fallback_host: &'static str,
     rx: Receiver<(String, i64)>,
@@ -27,13 +24,11 @@ pub struct Worker {
 
 impl Worker {
     pub fn new(
-        pool: RedisPool,
         default_url: &'static str,
         fallback_url: &'static str,
         rx: Receiver<(String, i64)>,
     ) -> Self {
         Self {
-            pool: Arc::new(pool),
             default_host: default_url,
             fallback_host: fallback_url,
             rx,
@@ -49,21 +44,17 @@ impl Worker {
         ));
 
         for worker_id in 0..WORKER_COROUTINES {
-            let pool = self.pool.clone();
             let rx = self.rx.clone();
             let default_pool = default_pool.clone();
             let fallback_pool = fallback_pool.clone();
 
             may::go!(move || {
-                let conn = pool.get_connection(worker_id % num_cpus::get());
-
                 loop {
                     match rx.try_recv() {
                         Ok((payment_json, timestamp_ms)) => {
                             if let Err(e) = process_payment_task(
                                 payment_json,
                                 timestamp_ms,
-                                &conn,
                                 &default_pool,
                                 &fallback_pool,
                             ) {
@@ -71,8 +62,6 @@ impl Worker {
                             }
                         }
                         Err(_) => {
-                            // No messages available, yield to other coroutines
-                            // may::coroutine::yield_now();
                             may::coroutine::sleep(Duration::from_millis(3));
                         }
                     }
@@ -86,7 +75,6 @@ impl Worker {
 fn process_payment_task(
     payment_json: String,
     timestamp_ms: i64,
-    conn: &crate::redis_pool::RedisConnection<'static>,
     default_pool: &Arc<ConnectionPool>,
     fallback_pool: &Arc<ConnectionPool>,
 ) -> Result<(), ProcessingError> {
@@ -97,7 +85,7 @@ fn process_payment_task(
 
     let processor = send_payment_with_fallback(default_pool, fallback_pool, &payment_json)?;
 
-    aggregate_payment(conn, timestamp_ms, amount_str, processor)
+    aggregate_payment(timestamp_ms, amount_str, processor)
 }
 
 #[inline(always)]
@@ -135,7 +123,6 @@ fn send_payment_with_fallback(
             }
         }
 
-        // Try fallback processor
         if let Ok(mut conn) = fallback_pool.get_connection() {
             match conn.send_payment(json_str) {
                 Ok(200) => {
@@ -161,60 +148,14 @@ fn send_payment_with_fallback(
 
 #[inline(always)]
 fn aggregate_payment(
-    conn: &crate::redis_pool::RedisConnection<'static>,
     timestamp_ms: i64,
     amount_str: &str,
     processor: Processor,
 ) -> Result<(), ProcessingError> {
     let category = processor.as_str();
+    let amount_cents = process_amount_to_cents(amount_str);
 
-    let amount_final = process_amount(amount_str);
+    crate::memory_store::MEMORY_STORE.record_payment(timestamp_ms, amount_cents, category);
 
-    conn.with_conn(|conn| {
-        let mut keys = SmallVec::<[String; 4]>::new();
-        keys.push(format_time_key(timestamp_ms, category, "ms"));
-        keys.push(format_time_key(timestamp_ms / 1000, category, "s"));
-        keys.push(format_time_key(timestamp_ms / 60000, category, "m"));
-        keys.push(format_time_key(timestamp_ms / 3600000, category, "h"));
-
-        let _: () = PROCESS_PAYMENT_SCRIPT
-            .key(&keys[0])
-            .key(&keys[1])
-            .key(&keys[2])
-            .key(&keys[3])
-            .arg(&amount_final)
-            .invoke(conn)
-            .map_err(|e| ProcessingError::RedisError(e.to_string()))?;
-        Ok(())
-    })
-}
-
-#[inline(always)]
-fn process_amount(amount_str: &str) -> String {
-    let mut result = String::with_capacity(amount_str.len() + 2);
-
-    let parts: Vec<&str> = amount_str.split('.').collect();
-
-    match parts.as_slice() {
-        [whole] => {
-            result.push_str(whole);
-            result.push_str("00");
-        }
-        [whole, decimal] if decimal.len() == 1 => {
-            result.push_str(whole);
-            result.push_str(decimal);
-            result.push('0');
-        }
-        [whole, decimal] if decimal.len() >= 2 => {
-            result.push_str(whole);
-            result.push_str(&decimal[..2]);
-        }
-        [whole, _] => {
-            result.push_str(whole);
-            result.push_str("00");
-        }
-        _ => unreachable!(),
-    }
-
-    result
+    Ok(())
 }

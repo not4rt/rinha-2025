@@ -125,4 +125,63 @@ impl HttpConnection {
 
         Ok(status_code)
     }
+
+    pub fn get_payments_summary(&mut self, raw_path: &str) -> Result<String, ProcessingError> {
+        let path = if raw_path.contains('?') {
+            [raw_path, "&individual=true"].concat()
+        } else {
+            [raw_path, "?individual=true"].concat()
+        };
+
+        let request = format!(
+            "GET {path} HTTP/1.1\r\n\
+             Host: {}\r\n\
+             Connection: keep-alive\r\n\
+             \r\n",
+            self.host
+        );
+
+        self.stream
+            .write_all(request.as_bytes())
+            .map_err(|e| ProcessingError::NetworkError(e.to_string()))?;
+
+        let mut response = [0u8; READ_BUFFER_SIZE];
+        let n = self
+            .stream
+            .read(&mut response)
+            .map_err(|e| ProcessingError::NetworkError(e.to_string()))?;
+
+        if n == 0 {
+            return Err(ProcessingError::ProcessorUnavailable);
+        }
+
+        let response_str = unsafe { std::str::from_utf8_unchecked(&response[..n]) };
+        Ok(response_str.to_string())
+    }
+
+    pub fn purge_payments(&mut self) -> Result<(), ProcessingError> {
+        let request = format!(
+            "DELETE /purge-payments HTTP/1.1\r\n\
+             Host: {}\r\n\
+             Connection: keep-alive\r\n\
+             \r\n",
+            self.host
+        );
+
+        self.stream
+            .write_all(request.as_bytes())
+            .map_err(|e| ProcessingError::NetworkError(e.to_string()))?;
+
+        let mut response = [0u8; READ_BUFFER_SIZE];
+        let n = self
+            .stream
+            .read(&mut response)
+            .map_err(|e| ProcessingError::NetworkError(e.to_string()))?;
+
+        if n == 0 {
+            return Err(ProcessingError::ProcessorUnavailable);
+        }
+
+        Ok(())
+    }
 }

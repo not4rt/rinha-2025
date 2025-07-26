@@ -18,6 +18,8 @@ redis = { version = "0.32.4", features = ["tcp_nodelay", "ahash"] }
 itoa = "1.0.15"
 once_cell = "1.21.3"
 parking_lot = "0.12.4"
+serde = { version = "1.0.219", features = ["derive"] }
+may_rpc = { version = "0.1.7", default-features = false }
 
 [profile.release]
 opt-level = 3

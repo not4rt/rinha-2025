@@ -5,24 +5,22 @@ use std::time::Duration;
 
 use may::{
     go,
-    sync::mpmc::{Receiver, Sender},
+    sync::mpmc::{self, Receiver, Sender},
 };
 use may_minihttp::HttpServiceFactory;
 
+mod memory_store;
 mod models;
-mod redis_pool;
 mod server;
 mod tcp;
 mod worker;
 
 fn start_workers(
     num_workers: usize,
-    redis_url: &'static str,
     default_url: &'static str,
     fallback_url: &'static str,
     rx: Receiver<(String, i64)>,
 ) {
-    // let mut worker_handles = Vec::with_capacity(num_workers);
     for i in 0..num_workers {
         let rx = rx.clone();
         let _ = go!(
@@ -31,35 +29,32 @@ fn start_workers(
                 .stack_size(0x2000),
             move || {
                 println!("Worker {i} started");
-
-                let pool = redis_pool::RedisPool::new(redis_url, num_workers);
-                let mut worker = worker::Worker::new(pool, default_url, fallback_url, rx);
-                worker.process_batch()
+                let mut worker = worker::Worker::new(default_url, fallback_url, rx);
+                worker.process_batch();
             }
         );
-        // .unwrap();
-        // worker_handles.push(handle);
     }
 }
 
 struct HttpServer {
-    redis_pool: redis_pool::RedisPool,
     tx: Sender<(String, i64)>,
+    peer_host: &'static str,
 }
 
 impl HttpServiceFactory for HttpServer {
-    type Service = server::Service<'static>;
+    type Service = server::Service;
 
-    fn new_service(&self, id: usize) -> Self::Service {
-        let conn = self.redis_pool.get_connection(id);
+    fn new_service(&self, _: usize) -> Self::Service {
         server::Service {
-            conn,
             tx: self.tx.clone(),
+            peer_host: self.peer_host,
         }
     }
 }
 
 fn main() {
+    may::config().set_pool_capacity(1000).set_stack_size(0x1000);
+
     let args: Vec<String> = std::env::args().collect();
     let mode_server = args.contains(&"--server".to_string());
     let mode_workers = args.contains(&"--workers".to_string());
@@ -69,29 +64,26 @@ fn main() {
         std::process::exit(1);
     }
 
-    may::config().set_pool_capacity(1000).set_stack_size(0x1000);
-
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
-    let redis_url = std::env::var("REDIS_URL").unwrap().leak();
     let default_processor_url = std::env::var("DEFAULT_PROCESSOR_URL").unwrap().leak();
     let fallback_processor_url = std::env::var("FALLBACK_PROCESSOR_URL").unwrap().leak();
+    let peer_host = std::env::var("PEER_HOST").unwrap().leak();
     let num_cpus = num_cpus::get();
 
     println!("Configuration:");
     println!("  CPUs: {num_cpus}");
     println!("  Port: {port}");
-    println!("  Redis: {redis_url}");
     println!("  Default Processor: {default_processor_url}");
     println!("  Fallback Processor: {fallback_processor_url}");
+    println!("  Peer Host: {peer_host}");
 
-    redis_pool::init_scripts();
+    // background worker processor
+    let (tx, rx) = mpmc::channel::<(String, i64)>();
 
-    let (tx, rx) = may::sync::mpmc::channel::<(String, i64)>();
     if mode_workers {
         println!("Starting workers...");
         start_workers(
             num_cpus,
-            redis_url,
             default_processor_url,
             fallback_processor_url,
             rx.clone(),
@@ -101,8 +93,8 @@ fn main() {
     if mode_server {
         println!("Starting HTTP server on port {port}");
         let server = HttpServer {
-            redis_pool: redis_pool::RedisPool::new(redis_url, num_cpus),
             tx: tx.clone(),
+            peer_host,
         };
 
         server
