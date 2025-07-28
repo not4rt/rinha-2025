@@ -26,7 +26,7 @@ fn start_workers(
         let _ = go!(
             may::coroutine::Builder::new()
                 .name(format!("worker-{i}"))
-                .stack_size(0x2000),
+                .stack_size(0x1000),
             move || {
                 println!("Worker {i} started");
                 let mut worker = worker::Worker::new(default_url, fallback_url, rx);
@@ -53,7 +53,7 @@ impl HttpServiceFactory for HttpServer {
 }
 
 fn main() {
-    may::config().set_pool_capacity(1000).set_stack_size(0x1000);
+    may::config().set_pool_capacity(10000).set_stack_size(0x1000).set_worker_pin(true);
 
     let args: Vec<String> = std::env::args().collect();
     let mode_server = args.contains(&"--server".to_string());
@@ -83,7 +83,7 @@ fn main() {
     if mode_workers {
         println!("Starting workers...");
         start_workers(
-            num_cpus,
+            5,
             default_processor_url,
             fallback_processor_url,
             rx.clone(),

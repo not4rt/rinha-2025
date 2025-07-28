@@ -122,6 +122,28 @@ fn send_payment_with_fallback(
             }
         }
 
+        // gambi
+        if let Ok(mut conn) = default_pool.get_connection() {
+            match conn.send_payment(json_str) {
+                Ok(200) => {
+                    default_pool.return_connection(conn);
+                    return Ok(Processor::Default);
+                }
+                Ok(422) => {
+                    default_pool.return_connection(conn);
+                    return Err(ProcessingError::AlreadyProcessed);
+                }
+                Ok(_) => {
+                    // eprintln!("Default processor status: {status}");
+                    default_pool.return_connection(conn);
+                }
+                Err(e) => {
+                    default_pool.return_connection(conn);
+                    eprintln!("Default processor connection error: {e:?}");
+                }
+            }
+        }
+
         if let Ok(mut conn) = fallback_pool.get_connection() {
             match conn.send_payment(json_str) {
                 Ok(200) => {

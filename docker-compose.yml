@@ -47,10 +47,17 @@ services:
       --server
       --workers
       "
+    ulimits:
+      nofile:
+        soft: 1000000
+        hard: 1000000
+      core:
+        soft: 1000000
+        hard: 1000000
     deploy:
       resources:
         limits:
-          memory: 50M
+          memory: 130M
           cpus: "0.65"
 
   backend2:
@@ -70,10 +77,17 @@ services:
       --server
       --workers
       "
+    ulimits:
+      nofile:
+        soft: 1000000
+        hard: 1000000
+      core:
+        soft: 1000000
+        hard: 1000000
     deploy:
       resources:
         limits:
-          memory: 50M
+          memory: 130M
           cpus: "0.65"
 
 networks:
