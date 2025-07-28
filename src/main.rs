@@ -83,7 +83,7 @@ fn main() {
     if mode_workers {
         println!("Starting workers...");
         start_workers(
-            5,
+            3,
             default_processor_url,
             fallback_processor_url,
             rx.clone(),

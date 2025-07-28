@@ -23,7 +23,6 @@ services:
       driver: "none"
     networks:
       - backend
-      - payment-processor
     deploy:
       resources:
         limits:
