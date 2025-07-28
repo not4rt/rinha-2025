@@ -81,7 +81,7 @@ jobs:
       - name: Run K6 performance tests
         id: k6_test
         run: |
-          cd rinha-test
+          cd tests
           echo "Running K6 tests..."
           k6 run -e MAX_REQUESTS=500 -e PARTICIPANT=github-action --summary-export=test-results.json rinha.js > k6-output.log 2>&1
 
@@ -184,7 +184,7 @@ jobs:
         with:
           name: test-results
           path: |
-            rinha-test/k6-output.log
-            rinha-test/test-results.json
-            rinha-test/partial-results.json
+            tests/k6-output.log
+            tests/test-results.json
+            tests/partial-results.json
           retention-days: 30
