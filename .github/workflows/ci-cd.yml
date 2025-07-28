@@ -49,7 +49,7 @@ jobs:
 
       - name: Start payment processor services
         run: |
-          cd rinha-test/payment-processor
+          cd tests/payment-processor
           docker compose up -d
           cd ../..
 
@@ -141,7 +141,7 @@ jobs:
         if: always()
         run: |
           docker compose down --volumes
-          cd rinha-test/payment-processor
+          cd tests/payment-processor
           docker compose down --volumes
           cd ../..
 
