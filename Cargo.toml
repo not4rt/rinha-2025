@@ -1,35 +1,28 @@
 [package]
 name = "rust_coroutines_rinha_2025"
-version = "2.0.0"
+version = "3.0.0"
 edition = "2024"
 
 [dependencies]
 bytes = "1"
 num_cpus = "1.0"
-smallvec = "1.1"
 
-log = { version = "0.4", features = ["release_max_level_off"] }
 mimalloc = { version = "0.1", default-features = false }
 
 may = { version = "0.3", default-features = false, features = ["io_timeout"] }
-may_minihttp = { version = "0.1", default-features = false }
+may_minihttp = { git = "https://github.com/not4rt/may_minihttp", rev = "0b914d4", default-features = false }
 chrono = "0.4.41"
-redis = { version = "0.32.4", features = ["tcp_nodelay", "ahash"] }
-itoa = "1.0.15"
-once_cell = "1.21.3"
 parking_lot = "0.12.4"
-serde = { version = "1.0.219", features = ["derive"] }
-may_rpc = { version = "0.1.7", default-features = false }
+dashmap = "6.1.0"
 
 [profile.release]
 opt-level = 3
-lto = "fat"
 codegen-units = 1
-panic = "abort"
-strip = true
+panic = 'abort'
+lto = 'fat'
 debug = false
-overflow-checks = false
 incremental = false
+overflow-checks = false
 
 [profile.release.build-override]
 opt-level = 3
