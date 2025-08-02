@@ -9,9 +9,16 @@ use may::sync::mpmc::{self, Receiver, Sender};
 use may_minihttp::{HttpService, HttpServiceFactory, Request, Response};
 use parking_lot::Mutex;
 use std::io::{self, BufRead, Read, Write};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
+
+static STATS: LazyLock<Stats> = LazyLock::new(Stats::new);
+static PEER_SOCKET1: LazyLock<String> = LazyLock::new(|| std::env::var("PEER1_SOCKET").unwrap());
+static PEER_SOCKET2: LazyLock<String> = LazyLock::new(|| std::env::var("PEER2_SOCKET").unwrap());
+
+static TX: OnceLock<Sender<([u8; 36], [u8; 32])>> = OnceLock::new();
+static RX: OnceLock<Receiver<([u8; 36], [u8; 32])>> = OnceLock::new();
 
 struct Stats {
     records: DashMap<DateTime<Utc>, (u64, bool)>,
@@ -117,17 +124,12 @@ impl ConnPool {
     }
 }
 
-fn process_worker(
-    rx: Receiver<([u8; 36], [u8; 32])>,
-    default_pool: Arc<ConnPool>,
-    fallback_pool: Arc<ConnPool>,
-    stats: &'static Stats,
-) {
+fn process_worker(default_pool: Arc<ConnPool>, fallback_pool: Arc<ConnPool>) {
     let mut req_buf = [0u8; 512];
     let mut resp_buf = [0u8; 256];
 
     loop {
-        match rx.try_recv() {
+        match RX.get().unwrap().try_recv() {
             Ok((correlation_id_bytes, amount_bytes)) => {
                 let now = Utc::now();
                 let mut payload = BytesMut::with_capacity(256);
@@ -194,7 +196,7 @@ fn process_worker(
 
                 let amount_cents = parse_amount_cents(amount);
                 if success {
-                    stats.record(now, amount_cents, is_fallback);
+                    STATS.record(now, amount_cents, is_fallback);
                 }
             }
             Err(_) => may::coroutine::sleep(Duration::from_millis(10)),
@@ -202,12 +204,7 @@ fn process_worker(
     }
 }
 
-struct Service {
-    tx: Sender<([u8; 36], [u8; 32])>,
-    peer1_socket: &'static str,
-    peer2_socket: &'static str,
-    stats: &'static Stats,
-}
+struct Service {}
 
 impl HttpService for Service {
     fn call<S: Read>(&mut self, req: Request<S>, rsp: &mut Response) -> io::Result<()> {
@@ -224,18 +221,22 @@ impl HttpService for Service {
                 let len = (body.len() - 66).min(32);
                 amount[..len].copy_from_slice(&body[65..body.len() - 1]);
 
-                unsafe { self.tx.send((correlation_id, amount)).unwrap_unchecked() };
+                unsafe {
+                    TX.get()
+                        .unwrap_unchecked()
+                        .send((correlation_id, amount))
+                        .unwrap_unchecked()
+                };
             }
             path if path.starts_with("/payments-summary") => {
                 println!("Received summary request: {path}");
                 let (from_ms, to_ms, from_peer) = parse_query_params(path);
 
-                let (dc, da, fc, fa) = self.stats.get_summary(from_ms, to_ms);
+                let (dc, da, fc, fa) = STATS.get_summary(from_ms, to_ms);
 
                 let (total_dc, total_da, total_fc, total_fa) = if !from_peer {
-                    let (pdc, pda, pfc, pfa) = fetch_peer_summary(self.peer1_socket, path).unwrap();
-                    let (pdc2, pda2, pfc2, pfa2) =
-                        fetch_peer_summary(self.peer2_socket, path).unwrap();
+                    let (pdc, pda, pfc, pfa) = fetch_peer_summary(&PEER_SOCKET1, path).unwrap();
+                    let (pdc2, pda2, pfc2, pfa2) = fetch_peer_summary(&PEER_SOCKET2, path).unwrap();
 
                     (
                         dc + pdc + pdc2,
@@ -258,12 +259,12 @@ impl HttpService for Service {
                     .body_vec(json.into_bytes());
             }
             "/purge-payments" => {
-                self.stats.reset();
+                STATS.reset();
 
                 let from_peer = req.path().contains("from_peer=true");
                 if !from_peer {
-                    let _ = purge_peer(self.peer1_socket);
-                    let _ = purge_peer(self.peer2_socket);
+                    let _ = purge_peer(&PEER_SOCKET1);
+                    let _ = purge_peer(&PEER_SOCKET2);
                 }
             }
             _ => {
@@ -425,23 +426,13 @@ fn extract_json_str<'a>(json: &'a str, key: &str) -> Option<&'a str> {
     Some(&json[start..start + end])
 }
 
-struct HttpServer {
-    tx: Sender<([u8; 36], [u8; 32])>,
-    peer1_socket: &'static str,
-    peer2_socket: &'static str,
-    stats: &'static Stats,
-}
+struct HttpServer {}
 
 impl HttpServiceFactory for HttpServer {
     type Service = Service;
 
     fn new_service(&self, _: usize) -> Self::Service {
-        Service {
-            tx: self.tx.clone(),
-            peer1_socket: self.peer1_socket,
-            peer2_socket: self.peer2_socket,
-            stats: self.stats,
-        }
+        Service {}
     }
 }
 
@@ -460,24 +451,23 @@ fn main() {
     let port = std::env::var("PORT").unwrap_or_else(|_| "8080".to_string());
     let default_url = std::env::var("DEFAULT_PROCESSOR_URL").unwrap().leak();
     let fallback_url = std::env::var("FALLBACK_PROCESSOR_URL").unwrap().leak();
-    let peer1_socket = std::env::var("PEER1_SOCKET").unwrap().leak();
-    let peer2_socket = std::env::var("PEER2_SOCKET").unwrap().leak();
 
     println!("Ultra-Performance Payment Processor");
     println!("Port: {}, Workers: {}", port, num_cpus::get());
 
     let (tx, rx) = mpmc::channel::<([u8; 36], [u8; 32])>();
-    let stats: &'static Stats = Box::leak(Box::new(Stats::new()));
+    TX.set(tx).unwrap();
+    RX.set(rx).unwrap();
+    // let stats: &'static Stats = Box::leak(Box::new(Stats::new()));
 
     if mode_workers {
         let default_pool = Arc::new(ConnPool::new(default_url, 50));
         let fallback_pool = Arc::new(ConnPool::new(fallback_url, 50));
 
         for _ in 0..1 {
-            let rx = rx.clone();
             let dp = default_pool.clone();
             let fp = fallback_pool.clone();
-            may::go!(move || process_worker(rx, dp, fp, stats));
+            may::go!(move || process_worker(dp, fp));
         }
     }
 
@@ -489,12 +479,7 @@ fn main() {
 
     if mode_server {
         println!("Starting HTTP server on {}", socket.display());
-        let server = HttpServer {
-            tx,
-            peer1_socket,
-            peer2_socket,
-            stats,
-        };
+        let server = HttpServer {};
         server.start_with_uds(socket).unwrap().join().unwrap();
     } else {
         loop {
