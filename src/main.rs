@@ -201,6 +201,7 @@ fn process_worker(default_pool: Arc<ConnPool>, fallback_pool: Arc<ConnPool>) {
             }
             Err(_) => may::coroutine::sleep(Duration::from_millis(10)),
         }
+        may::coroutine::sleep(Duration::from_millis(1));
     }
 }
 
@@ -464,8 +465,8 @@ fn main() {
     // let stats: &'static Stats = Box::leak(Box::new(Stats::new()));
 
     if mode_workers {
-        let default_pool = Arc::new(ConnPool::new(default_url, 50));
-        let fallback_pool = Arc::new(ConnPool::new(fallback_url, 50));
+        let default_pool = Arc::new(ConnPool::new(default_url, 100));
+        let fallback_pool = Arc::new(ConnPool::new(fallback_url, 100));
 
         let dp = default_pool.clone();
         let fp = fallback_pool.clone();
