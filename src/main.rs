@@ -437,7 +437,10 @@ impl HttpServiceFactory for HttpServer {
 }
 
 fn main() {
-    may::config().set_pool_capacity(5000).set_stack_size(0x900);
+    may::config()
+        .set_pool_capacity(5000)
+        .set_stack_size(0x900)
+        .set_worker_pin(true);
 
     let args: Vec<String> = std::env::args().collect();
     let mode_server = args.contains(&"--server".to_string());
@@ -464,11 +467,9 @@ fn main() {
         let default_pool = Arc::new(ConnPool::new(default_url, 50));
         let fallback_pool = Arc::new(ConnPool::new(fallback_url, 50));
 
-        for _ in 0..1 {
-            let dp = default_pool.clone();
-            let fp = fallback_pool.clone();
-            may::go!(move || process_worker(dp, fp));
-        }
+        let dp = default_pool.clone();
+        let fp = fallback_pool.clone();
+        may::go!(move || process_worker(dp, fp));
     }
 
     let path = std::env::var("SOCKET_PATH").unwrap();

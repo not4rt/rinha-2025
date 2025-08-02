@@ -32,7 +32,7 @@ services:
       resources:
         limits:
           memory: 50M
-          cpus: "0.4"
+          cpus: "0.3"
 
   backend1:
     build: .
@@ -60,7 +60,7 @@ services:
       resources:
         limits:
           memory: 100M
-          cpus: "0.3"
+          cpus: "0.4"
 
   backend2:
     build: .
