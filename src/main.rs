@@ -5,12 +5,11 @@ use chrono::{DateTime, FixedOffset, Utc};
 use dashmap::DashMap;
 use may::coroutine::sleep;
 use may::net::TcpStream;
-use may::sync::Mutex;
 use may::sync::mpmc::{self, Receiver, Sender};
 use may_minihttp::{HttpService, HttpServiceFactory, Request, Response};
 use std::env;
 use std::io::{self, BufRead, Read, Write};
-use std::sync::{Arc, LazyLock, OnceLock};
+use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
 
 static STATS: LazyLock<Stats> = LazyLock::new(Stats::new);
@@ -85,53 +84,41 @@ impl Stats {
     }
 }
 
-struct ConnPool {
-    conns: Mutex<Vec<TcpStream>>,
+#[inline(always)]
+fn new_connection(host: &str) -> TcpStream {
+    let stream = unsafe { TcpStream::connect(host).unwrap_unchecked() };
+    unsafe {
+        stream.set_nodelay(true).unwrap_unchecked();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(1000)))
+            .unwrap_unchecked();
+        stream
+            .set_write_timeout(Some(Duration::from_millis(1000)))
+            .unwrap_unchecked();
+    }
+    // println!("Created new connection to {}", host);
+    stream
+}
+
+struct Conn {
+    conn: TcpStream,
     host: &'static str,
 }
 
-impl ConnPool {
+impl Conn {
     fn new(host: &'static str) -> Self {
-        Self {
-            conns: Mutex::new(Vec::with_capacity(50)),
-            host,
-        }
+        let conn = new_connection(host);
+        Self { conn, host }
     }
 
     #[inline(always)]
-    fn get(&self) -> TcpStream {
-        let mut pool = unsafe { self.conns.lock().unwrap_unchecked() };
-
-        if let Some(conn) = pool.pop() {
-            // println!("Reused a connection to {}", self.host);
-            // println!("The connection pool has {} connections", pool.len());
-            return conn;
-        }
-
-        // println!("The connection pool has {} connections", pool.len());
-        drop(pool);
-
-        let stream = unsafe { TcpStream::connect(self.host).unwrap_unchecked() };
-        unsafe {
-            stream.set_nodelay(true).unwrap_unchecked();
-            stream
-                .set_read_timeout(Some(Duration::from_millis(1000)))
-                .unwrap_unchecked();
-            stream
-                .set_write_timeout(Some(Duration::from_millis(1000)))
-                .unwrap_unchecked();
-        }
-        // println!("Created new connection to {}", self.host);
-        stream
-    }
-
-    #[inline(always)]
-    fn put(&self, conn: TcpStream) {
-        unsafe { self.conns.lock().unwrap_unchecked().push(conn) };
+    fn refresh_connection(&mut self) {
+        let conn = new_connection(self.host);
+        self.conn = conn;
     }
 }
 
-fn process_worker(default_pool: Arc<ConnPool>, fallback_pool: Arc<ConnPool>) {
+fn process_worker(mut default_pool: Conn, mut fallback_pool: Conn) {
     let mut req_buf = [0u8; 512];
     let mut resp_buf = [0u8; 203]; // the response is usually 203 bytes long, except on status code 422 and some other edge cases
 
@@ -175,14 +162,14 @@ fn process_worker(default_pool: Arc<ConnPool>, fallback_pool: Arc<ConnPool>) {
                 let mut is_fallback = false;
                 let success;
                 loop {
-                    let pool: &Arc<ConnPool> = if attempt < 5 {
-                        &default_pool
+                    let pool = if attempt < 5 {
+                        &mut default_pool
                     } else {
                         attempt = 0;
                         is_fallback = true;
-                        &fallback_pool
+                        &mut fallback_pool
                     };
-                    let mut conn = pool.get();
+                    let conn = &mut pool.conn;
 
                     if conn.write_all(&req_buf[..tlen]).is_ok()
                         && let Ok(n) = conn.read(&mut resp_buf)
@@ -191,7 +178,6 @@ fn process_worker(default_pool: Arc<ConnPool>, fallback_pool: Arc<ConnPool>) {
                         match &resp_buf[9..12] {
                             b"200" => {
                                 success = true;
-                                pool.put(conn);
                                 break;
                             }
                             b"422" => {
@@ -200,16 +186,15 @@ fn process_worker(default_pool: Arc<ConnPool>, fallback_pool: Arc<ConnPool>) {
                                 //     String::from_utf8_lossy(&correlation_id_bytes)
                                 // );
                                 success = true;
-                                is_fallback = false; // 422 means it was processed in the previously request, so probably not a fallback
+                                is_fallback = false; // 422 means it was processed in the previously request, so probably not a fallbac
+                                pool.refresh_connection(); // refresh the connection, because there is a big error message on 422
                                 break;
-                                // not putting the connection back on the pool, because there is a big error message on 422
                             }
                             b"500" => {
                                 // println!(
                                 //     "Received 500 Internal Server Error for correlationId {}",
                                 //     String::from_utf8_lossy(&correlation_id_bytes)
                                 // );
-                                pool.put(conn);
                                 attempt += 1;
                                 sleep(Duration::from_millis(1251)); // server is unhealthy
                             }
@@ -219,7 +204,7 @@ fn process_worker(default_pool: Arc<ConnPool>, fallback_pool: Arc<ConnPool>) {
                                 //     String::from_utf8_lossy(status),
                                 //     correlation_id
                                 // );
-                                // not putting the connection back on the pool, because it might have an error message
+                                pool.refresh_connection(); // refresh the connection, because it might have an error message
                             }
                         }
                     } else {
@@ -228,7 +213,7 @@ fn process_worker(default_pool: Arc<ConnPool>, fallback_pool: Arc<ConnPool>) {
                         //     String::from_utf8_lossy(&correlation_id_bytes)
                         // );
 
-                        // not putting the connection back on the pool, because it might have data left in the buffer
+                        pool.refresh_connection(); // refresh the connection, because it might have data left in the buffer
                         sleep(Duration::from_millis(1));
                     }
                 }
@@ -453,14 +438,14 @@ impl HttpServiceFactory for Service {
 }
 
 fn main() {
-    may::config().set_pool_capacity(5000).set_stack_size(0x900);
+    may::config().set_pool_capacity(5000).set_stack_size(0x5000);
 
     let (tx, rx) = mpmc::channel();
     TX.set(tx).unwrap();
     RX.set(rx).unwrap();
 
-    let default_pool = Arc::new(ConnPool::new(DEFAULT_HOST));
-    let fallback_pool = Arc::new(ConnPool::new(FALLBACK_HOST));
+    let default_pool = Conn::new(DEFAULT_HOST);
+    let fallback_pool = Conn::new(FALLBACK_HOST);
     may::go!(move || process_worker(default_pool, fallback_pool));
 
     let socket = env::var("SOCKET_PATH").unwrap();
