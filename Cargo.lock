@@ -430,13 +430,11 @@ dependencies = [
 name = "rust_coroutines_rinha_2025"
 version = "3.0.0"
 dependencies = [
- "bytes",
  "chrono",
  "dashmap",
  "may",
  "may_minihttp",
  "mimalloc",
- "num_cpus",
  "parking_lot",
 ]
 
