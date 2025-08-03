@@ -19,6 +19,10 @@ static PEER_SOCKET2: LazyLock<String> = LazyLock::new(|| std::env::var("PEER2_SO
 static TX: OnceLock<Sender<([u8; 36], [u8; 32])>> = OnceLock::new();
 static RX: OnceLock<Receiver<([u8; 36], [u8; 32])>> = OnceLock::new();
 
+const POOL_SIZE: usize = 50;
+const DEFAULT_HOST: &str = "payment-processor-default:8080";
+const FALLBACK_HOST: &str = "payment-processor-fallback:8080";
+
 struct Stats {
     records: DashMap<DateTime<Utc>, (u64, bool)>,
 }
@@ -88,9 +92,9 @@ struct ConnPool {
 }
 
 impl ConnPool {
-    fn new(host: &'static str, size: usize) -> Self {
-        let mut conns = Vec::with_capacity(size);
-        for _ in 0..size {
+    fn new(host: &'static str) -> Self {
+        let mut conns = Vec::with_capacity(POOL_SIZE);
+        for _ in 0..POOL_SIZE {
             conns.push(Mutex::new(None));
         }
         Self {
@@ -157,7 +161,8 @@ fn process_worker(default_pool: Arc<ConnPool>, fallback_pool: Arc<ConnPool>) {
                     r#"","requestedAt":""#,
                     &now.to_rfc3339(),
                     r#""}"#,
-                ].concat();
+                ]
+                .concat();
                 let payload = payload_string.as_bytes();
 
                 let mut is_fallback = false;
@@ -216,6 +221,7 @@ fn process_worker(default_pool: Arc<ConnPool>, fallback_pool: Arc<ConnPool>) {
 struct Service;
 
 impl HttpService for Service {
+    #[inline(always)]
     fn call<S: Read>(&mut self, req: Request<S>, rsp: &mut Response) -> io::Result<()> {
         match req.path() {
             "/payments" => {
@@ -433,26 +439,17 @@ fn main() {
         std::process::exit(1);
     }
 
-    let default_url = std::env::var("DEFAULT_PROCESSOR_URL").unwrap().leak();
-    let fallback_url = std::env::var("FALLBACK_PROCESSOR_URL").unwrap().leak();
-
     let (tx, rx) = mpmc::channel();
     TX.set(tx).unwrap();
     RX.set(rx).unwrap();
 
     if mode_workers {
-        let default_pool = Arc::new(ConnPool::new(default_url, 50));
-        let fallback_pool = Arc::new(ConnPool::new(fallback_url, 50));
+        let default_pool = Arc::new(ConnPool::new(DEFAULT_HOST));
+        let fallback_pool = Arc::new(ConnPool::new(FALLBACK_HOST));
         may::go!(move || process_worker(default_pool, fallback_pool));
     }
 
-    if mode_server {
-        let socket = std::env::var("SOCKET_PATH").unwrap();
-        let socket = std::path::Path::new(&socket);
-        Service.start_with_uds(socket).unwrap().join().unwrap();
-    } else {
-        loop {
-            may::coroutine::sleep(Duration::from_secs(3600));
-        }
-    }
+    let socket = std::env::var("SOCKET_PATH").unwrap();
+    let socket = std::path::Path::new(&socket);
+    Service.start_with_uds(socket).unwrap().join().unwrap();
 }

@@ -1,6 +1,6 @@
 services:
   haproxy:
-    image: haproxy:latest
+    image: haproxy:3.2.3-alpine
     command: >
       sh -c "
       echo 'global
@@ -22,8 +22,7 @@ services:
     depends_on:
       - backend1
       - backend2
-    logging:
-      driver: "none"
+      - backend3
     networks:
       - backend
     volumes:
@@ -37,9 +36,6 @@ services:
   backend1:
     build: .
     environment:
-      PORT: 8080
-      DEFAULT_PROCESSOR_URL: payment-processor-default:8080
-      FALLBACK_PROCESSOR_URL: payment-processor-fallback:8080
       PEER1_SOCKET: /sockets/may.sock.2
       PEER2_SOCKET: /sockets/may.sock.3
       SOCKET_PATH: /sockets/may.sock.1
@@ -48,14 +44,6 @@ services:
     networks:
       - backend
       - payment-processor
-    restart: unless-stopped
-    ulimits:
-      nofile:
-        soft: 1000000
-        hard: 1000000
-      core:
-        soft: 1000000
-        hard: 1000000
     deploy:
       resources:
         limits:
@@ -65,9 +53,6 @@ services:
   backend2:
     build: .
     environment:
-      PORT: 8080
-      DEFAULT_PROCESSOR_URL: payment-processor-default:8080
-      FALLBACK_PROCESSOR_URL: payment-processor-fallback:8080
       PEER1_SOCKET: /sockets/may.sock.1
       PEER2_SOCKET: /sockets/may.sock.3
       SOCKET_PATH: /sockets/may.sock.2
@@ -76,14 +61,6 @@ services:
     networks:
       - backend
       - payment-processor
-    restart: unless-stopped
-    ulimits:
-      nofile:
-        soft: 1000000
-        hard: 1000000
-      core:
-        soft: 1000000
-        hard: 1000000
     deploy:
       resources:
         limits:
@@ -93,9 +70,6 @@ services:
   backend3:
     build: .
     environment:
-      PORT: 8080
-      DEFAULT_PROCESSOR_URL: payment-processor-default:8080
-      FALLBACK_PROCESSOR_URL: payment-processor-fallback:8080
       PEER1_SOCKET: /sockets/may.sock.1
       PEER2_SOCKET: /sockets/may.sock.2
       SOCKET_PATH: /sockets/may.sock.3
@@ -104,14 +78,6 @@ services:
     networks:
       - backend
       - payment-processor
-    restart: unless-stopped
-    ulimits:
-      nofile:
-        soft: 1000000
-        hard: 1000000
-      core:
-        soft: 1000000
-        hard: 1000000
     deploy:
       resources:
         limits:
