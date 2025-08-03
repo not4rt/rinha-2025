@@ -5,7 +5,7 @@ use chrono::{DateTime, FixedOffset, Utc};
 use dashmap::DashMap;
 use may::coroutine::sleep;
 use may::net::TcpStream;
-use may::sync::mpmc::{self, Receiver, Sender};
+use may::sync::mpsc::{self, Receiver, Sender};
 use may_minihttp::{HttpService, HttpServiceFactory, Request, Response};
 use std::env;
 use std::io::{self, BufRead, Read, Write};
@@ -440,7 +440,7 @@ impl HttpServiceFactory for Service {
 fn main() {
     may::config().set_pool_capacity(5000).set_stack_size(0x5000);
 
-    let (tx, rx) = mpmc::channel();
+    let (tx, rx) = mpsc::channel();
     TX.set(tx).unwrap();
     RX.set(rx).unwrap();
 
