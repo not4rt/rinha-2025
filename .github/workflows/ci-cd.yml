@@ -114,11 +114,11 @@ jobs:
             fi
 
             if [ -n "$TOTAL_AMOUNT" ] && [ "$TOTAL_AMOUNT" != "null" ] && [ "$TOTAL_AMOUNT" != "" ]; then
-              if (( $(echo "$TOTAL_AMOUNT > 250000" | bc -l) )); then
+              if (( $(echo "$TOTAL_AMOUNT > 303000" | bc -l) )); then
                 AMOUNT_VALID=true
-                echo "✅ Transaction amount test PASSED - ${TOTAL_AMOUNT} > 250000"
+                echo "✅ Transaction amount test PASSED - ${TOTAL_AMOUNT} > 303000"
               else
-                echo "❌ Transaction amount test FAILED - ${TOTAL_AMOUNT} <= 250000"
+                echo "❌ Transaction amount test FAILED - ${TOTAL_AMOUNT} <= 303000"
               fi
             else
               echo "❌ Could not extract total transaction amount from test results"
@@ -130,7 +130,7 @@ jobs:
               echo "🎉 ALL PERFORMANCE TESTS PASSED!"
             else
               echo "performance_passed=false" >> $GITHUB_OUTPUT
-              echo "❌ Performance tests FAILED - Both P99 < 1.5ms AND total amount > 250000 required"
+              echo "❌ Performance tests FAILED - Both P99 < 1.5ms AND total amount > 303000 required"
             fi
           else
             echo "performance_passed=false" >> $GITHUB_OUTPUT
@@ -169,7 +169,7 @@ jobs:
         run: |
           echo "## Performance Test Results" >> $GITHUB_STEP_SUMMARY
           echo "- **P99 Duration**: ${{ steps.k6_test.outputs.p99 }}ms (threshold: < 1.5ms)" >> $GITHUB_STEP_SUMMARY
-          echo "- **Total Transaction Amount**: ${{ steps.k6_test.outputs.total_amount }} (threshold: > 250000)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Total Transaction Amount**: ${{ steps.k6_test.outputs.total_amount }} (threshold: > 303000)" >> $GITHUB_STEP_SUMMARY
           echo "- **Overall Result**: ${{ steps.k6_test.outputs.performance_passed == 'true' && '✅ PASSED' || '❌ FAILED' }}" >> $GITHUB_STEP_SUMMARY
 
           if [[ "${{ steps.k6_test.outputs.performance_passed }}" == "true" && "${{ github.ref }}" == "refs/heads/main" ]]; then

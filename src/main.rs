@@ -3,23 +3,23 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use chrono::{DateTime, FixedOffset, Utc};
 use dashmap::DashMap;
+use may::coroutine::sleep;
 use may::net::TcpStream;
+use may::sync::Mutex;
 use may::sync::mpmc::{self, Receiver, Sender};
 use may_minihttp::{HttpService, HttpServiceFactory, Request, Response};
-use parking_lot::Mutex;
+use std::env;
 use std::io::{self, BufRead, Read, Write};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
 static STATS: LazyLock<Stats> = LazyLock::new(Stats::new);
-static PEER_SOCKET1: LazyLock<String> = LazyLock::new(|| std::env::var("PEER1_SOCKET").unwrap());
-static PEER_SOCKET2: LazyLock<String> = LazyLock::new(|| std::env::var("PEER2_SOCKET").unwrap());
+static PEER_SOCKET1: LazyLock<String> = LazyLock::new(|| env::var("PEER1_SOCKET").unwrap());
+static PEER_SOCKET2: LazyLock<String> = LazyLock::new(|| env::var("PEER2_SOCKET").unwrap());
 
 static TX: OnceLock<Sender<([u8; 36], [u8; 32])>> = OnceLock::new();
 static RX: OnceLock<Receiver<([u8; 36], [u8; 32])>> = OnceLock::new();
 
-const POOL_SIZE: usize = 50;
 const DEFAULT_HOST: &str = "payment-processor-default:8080";
 const FALLBACK_HOST: &str = "payment-processor-fallback:8080";
 
@@ -86,58 +86,54 @@ impl Stats {
 }
 
 struct ConnPool {
-    conns: Vec<Mutex<Option<TcpStream>>>,
+    conns: Mutex<Vec<TcpStream>>,
     host: &'static str,
-    idx: AtomicUsize,
 }
 
 impl ConnPool {
     fn new(host: &'static str) -> Self {
-        let mut conns = Vec::with_capacity(POOL_SIZE);
-        for _ in 0..POOL_SIZE {
-            conns.push(Mutex::new(None));
-        }
         Self {
-            conns,
+            conns: Mutex::new(Vec::with_capacity(50)),
             host,
-            idx: AtomicUsize::new(0),
         }
     }
 
     #[inline(always)]
     fn get(&self) -> TcpStream {
-        let idx = self.idx.fetch_add(1, Ordering::Relaxed) % self.conns.len();
-        let mut slot = self.conns[idx].lock();
+        let mut pool = unsafe { self.conns.lock().unwrap_unchecked() };
 
-        if let Some(conn) = slot.take() {
-            conn
-        } else {
-            let stream = unsafe { TcpStream::connect(self.host).unwrap_unchecked() };
-            unsafe { stream.set_nodelay(true).unwrap_unchecked() };
-            unsafe {
-                stream
-                    .set_read_timeout(Some(Duration::from_millis(5000)))
-                    .unwrap_unchecked()
-            };
-            unsafe {
-                stream
-                    .set_write_timeout(Some(Duration::from_millis(5000)))
-                    .unwrap_unchecked()
-            };
-            stream
+        if let Some(conn) = pool.pop() {
+            // println!("Reused a connection to {}", self.host);
+            // println!("The connection pool has {} connections", pool.len());
+            return conn;
         }
+
+        // println!("The connection pool has {} connections", pool.len());
+        drop(pool);
+
+        let stream = unsafe { TcpStream::connect(self.host).unwrap_unchecked() };
+        unsafe {
+            stream.set_nodelay(true).unwrap_unchecked();
+            stream
+                .set_read_timeout(Some(Duration::from_millis(1000)))
+                .unwrap_unchecked();
+            stream
+                .set_write_timeout(Some(Duration::from_millis(1000)))
+                .unwrap_unchecked();
+        }
+        // println!("Created new connection to {}", self.host);
+        stream
     }
 
     #[inline(always)]
     fn put(&self, conn: TcpStream) {
-        let idx = self.idx.fetch_add(1, Ordering::Relaxed) % self.conns.len();
-        *self.conns[idx].lock() = Some(conn);
+        unsafe { self.conns.lock().unwrap_unchecked().push(conn) };
     }
 }
 
 fn process_worker(default_pool: Arc<ConnPool>, fallback_pool: Arc<ConnPool>) {
     let mut req_buf = [0u8; 512];
-    let mut resp_buf = [0u8; 256];
+    let mut resp_buf = [0u8; 203]; // the response is usually 203 bytes long, except on status code 422 and some other edge cases
 
     loop {
         match RX.get().unwrap().try_recv() {
@@ -165,28 +161,28 @@ fn process_worker(default_pool: Arc<ConnPool>, fallback_pool: Arc<ConnPool>) {
                 .concat();
                 let payload = payload_string.as_bytes();
 
-                let mut is_fallback = false;
-                let mut success = false;
+                let header = format!(
+                    "POST /payments HTTP/1.1\r\nHost: payment-processor\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                    payload.len()
+                );
 
-                for attempt in 0..3 {
-                    let pool = if attempt < 2 {
+                let hlen = header.len();
+                let tlen = hlen + payload.len();
+                req_buf[..hlen].copy_from_slice(header.as_bytes());
+                req_buf[hlen..tlen].copy_from_slice(payload);
+
+                let mut attempt = 0;
+                let mut is_fallback = false;
+                let success;
+                loop {
+                    let pool: &Arc<ConnPool> = if attempt < 5 {
                         &default_pool
                     } else {
+                        attempt = 0;
                         is_fallback = true;
                         &fallback_pool
                     };
-
                     let mut conn = pool.get();
-                    let header = format!(
-                        "POST /payments HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
-                        pool.host,
-                        payload.len()
-                    );
-
-                    let hlen = header.len();
-                    let tlen = hlen + payload.len();
-                    req_buf[..hlen].copy_from_slice(header.as_bytes());
-                    req_buf[hlen..tlen].copy_from_slice(payload);
 
                     if conn.write_all(&req_buf[..tlen]).is_ok()
                         && let Ok(n) = conn.read(&mut resp_buf)
@@ -199,22 +195,51 @@ fn process_worker(default_pool: Arc<ConnPool>, fallback_pool: Arc<ConnPool>) {
                                 break;
                             }
                             b"422" => {
-                                pool.put(conn);
+                                // println!(
+                                //     "Received 422 Unprocessable Entity for correlationId {}",
+                                //     String::from_utf8_lossy(&correlation_id_bytes)
+                                // );
+                                success = true;
+                                is_fallback = false; // 422 means it was processed in the previously request, so probably not a fallback
                                 break;
+                                // not putting the connection back on the pool, because there is a big error message on 422
                             }
-                            _ => {}
+                            b"500" => {
+                                // println!(
+                                //     "Received 500 Internal Server Error for correlationId {}",
+                                //     String::from_utf8_lossy(&correlation_id_bytes)
+                                // );
+                                pool.put(conn);
+                                attempt += 1;
+                                sleep(Duration::from_millis(1251)); // server is unhealthy
+                            }
+                            _ => {
+                                // println!(
+                                //     "Received bad status code {} for correlationId {}",
+                                //     String::from_utf8_lossy(status),
+                                //     correlation_id
+                                // );
+                                // not putting the connection back on the pool, because it might have an error message
+                            }
                         }
+                    } else {
+                        // println!(
+                        //     "Connection failed for correlationId {}",
+                        //     String::from_utf8_lossy(&correlation_id_bytes)
+                        // );
+
+                        // not putting the connection back on the pool, because it might have data left in the buffer
+                        sleep(Duration::from_millis(1));
                     }
-                    pool.put(conn);
                 }
 
                 if success {
                     STATS.record(now, parse_amount_cents(amount), is_fallback);
                 }
             }
-            Err(_) => may::coroutine::sleep(Duration::from_millis(10)),
+            Err(_) => sleep(Duration::from_millis(10)),
         }
-        may::coroutine::sleep(Duration::from_millis(1));
+        sleep(Duration::from_millis(1));
     }
 }
 
@@ -334,7 +359,6 @@ fn parse_amount_cents(amount_str: &str) -> u64 {
 
 fn fetch_peer_summary(socket: &str, path: &str) -> io::Result<(u64, u64, u64, u64)> {
     let mut stream = may::os::unix::net::UnixStream::connect(socket)?;
-    stream.set_read_timeout(Some(Duration::from_millis(10000)))?;
 
     stream.write_all(
         format!(
@@ -422,6 +446,7 @@ fn extract_json_str<'a>(json: &'a str, key: &str) -> Option<&'a str> {
 
 impl HttpServiceFactory for Service {
     type Service = Self;
+    #[inline(always)]
     fn new_service(&self, _: usize) -> Self {
         Self
     }
@@ -430,26 +455,15 @@ impl HttpServiceFactory for Service {
 fn main() {
     may::config().set_pool_capacity(5000).set_stack_size(0x900);
 
-    let args: Vec<String> = std::env::args().collect();
-    let mode_server = args.contains(&"--server".to_string());
-    let mode_workers = args.contains(&"--workers".to_string());
-
-    if !mode_server && !mode_workers {
-        eprintln!("Specify at least 1 mode (--server or --workers)");
-        std::process::exit(1);
-    }
-
     let (tx, rx) = mpmc::channel();
     TX.set(tx).unwrap();
     RX.set(rx).unwrap();
 
-    if mode_workers {
-        let default_pool = Arc::new(ConnPool::new(DEFAULT_HOST));
-        let fallback_pool = Arc::new(ConnPool::new(FALLBACK_HOST));
-        may::go!(move || process_worker(default_pool, fallback_pool));
-    }
+    let default_pool = Arc::new(ConnPool::new(DEFAULT_HOST));
+    let fallback_pool = Arc::new(ConnPool::new(FALLBACK_HOST));
+    may::go!(move || process_worker(default_pool, fallback_pool));
 
-    let socket = std::env::var("SOCKET_PATH").unwrap();
+    let socket = env::var("SOCKET_PATH").unwrap();
     let socket = std::path::Path::new(&socket);
     Service.start_with_uds(socket).unwrap().join().unwrap();
 }
