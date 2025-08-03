@@ -14,7 +14,7 @@ use std::time::Duration;
 
 static STATS: LazyLock<Stats> = LazyLock::new(Stats::new);
 static PEER_SOCKET1: LazyLock<String> = LazyLock::new(|| env::var("PEER1_SOCKET").unwrap());
-static PEER_SOCKET2: LazyLock<String> = LazyLock::new(|| env::var("PEER2_SOCKET").unwrap());
+// static PEER_SOCKET2: LazyLock<String> = LazyLock::new(|| env::var("PEER2_SOCKET").unwrap());
 
 static TX: OnceLock<Sender<([u8; 36], [u8; 18])>> = OnceLock::new();
 static RX: OnceLock<Receiver<([u8; 36], [u8; 18])>> = OnceLock::new();
@@ -255,12 +255,12 @@ impl HttpService for Service {
 
                 let (total_dc, total_da, total_fc, total_fa) = if !from_peer {
                     let (pdc, pda, pfc, pfa) = fetch_peer_summary(&PEER_SOCKET1, path).unwrap();
-                    let (pdc2, pda2, pfc2, pfa2) = fetch_peer_summary(&PEER_SOCKET2, path).unwrap();
+                    // let (pdc2, pda2, pfc2, pfa2) = fetch_peer_summary(&PEER_SOCKET2, path).unwrap();
                     (
-                        dc + pdc + pdc2,
-                        da + pda + pda2,
-                        fc + pfc + pfc2,
-                        fa + pfa + pfa2,
+                        dc + pdc,
+                        da + pda,
+                        fc + pfc,
+                        fa + pfa,
                     )
                 } else {
                     (dc, da, fc, fa)
@@ -276,7 +276,7 @@ impl HttpService for Service {
                 let from_peer = req.path().contains("from_peer=true");
                 if !from_peer {
                     let _ = purge_peer(&PEER_SOCKET1);
-                    let _ = purge_peer(&PEER_SOCKET2);
+                    // let _ = purge_peer(&PEER_SOCKET2);
                 }
             }
             _ => {
