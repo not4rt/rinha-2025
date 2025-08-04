@@ -13,7 +13,9 @@ services:
       backend api_backend
         balance static-rr
         server backend1 /sockets/may.sock.1
-        server backend2 /sockets/may.sock.2' > /tmp/haproxy.cfg &&
+        server backend2 /sockets/may.sock.2
+        server backend3 /sockets/may.sock.3
+        server backend4 /sockets/may.sock.4' > /tmp/haproxy.cfg &&
       haproxy -f /tmp/haproxy.cfg"
     user: "0"
     ports:
@@ -21,7 +23,8 @@ services:
     depends_on:
       - backend1
       - backend2
-      # - backend3
+      - backend3
+      - backend4
     networks:
       - backend
     volumes:
@@ -36,7 +39,8 @@ services:
     build: .
     environment:
       PEER1_SOCKET: /sockets/may.sock.2
-      # PEER2_SOCKET: /sockets/may.sock.3
+      PEER2_SOCKET: /sockets/may.sock.3
+      PEER3_SOCKET: /sockets/may.sock.4
       SOCKET_PATH: /sockets/may.sock.1
     volumes:
       - sockets:/sockets:rw
@@ -46,14 +50,15 @@ services:
     deploy:
       resources:
         limits:
-          memory: 75M
-          cpus: "0.6"
+          memory: 50M
+          cpus: "0.4"
 
   backend2:
     build: .
     environment:
       PEER1_SOCKET: /sockets/may.sock.1
-      # PEER2_SOCKET: /sockets/may.sock.3
+      PEER2_SOCKET: /sockets/may.sock.3
+      PEER3_SOCKET: /sockets/may.sock.4
       SOCKET_PATH: /sockets/may.sock.2
     volumes:
       - sockets:/sockets:rw
@@ -63,25 +68,44 @@ services:
     deploy:
       resources:
         limits:
-          memory: 75M
-          cpus: "0.6"
+          memory: 50M
+          cpus: "0.4"
 
-  # backend3:
-  #   build: .
-  #   environment:
-  #     PEER1_SOCKET: /sockets/may.sock.1
-  #     PEER2_SOCKET: /sockets/may.sock.2
-  #     SOCKET_PATH: /sockets/may.sock.3
-  #   volumes:
-  #     - sockets:/sockets:rw
-  #   networks:
-  #     - backend
-  #     - payment-processor
-  #   deploy:
-  #     resources:
-  #       limits:
-  #         memory: 75M
-  #         cpus: "0.4"
+  backend3:
+    build: .
+    environment:
+      PEER1_SOCKET: /sockets/may.sock.1
+      PEER2_SOCKET: /sockets/may.sock.2
+      PEER3_SOCKET: /sockets/may.sock.4
+      SOCKET_PATH: /sockets/may.sock.3
+    volumes:
+      - sockets:/sockets:rw
+    networks:
+      - backend
+      - payment-processor
+    deploy:
+      resources:
+        limits:
+          memory: 50M
+          cpus: "0.4"
+
+  backend4:
+    build: .
+    environment:
+      PEER1_SOCKET: /sockets/may.sock.1
+      PEER2_SOCKET: /sockets/may.sock.2
+      PEER3_SOCKET: /sockets/may.sock.3
+      SOCKET_PATH: /sockets/may.sock.4
+    volumes:
+      - sockets:/sockets:rw
+    networks:
+      - backend
+      - payment-processor
+    deploy:
+      resources:
+        limits:
+          memory: 50M
+          cpus: "0.4"
 
 volumes:
   sockets:
