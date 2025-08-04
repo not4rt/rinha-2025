@@ -435,7 +435,7 @@ impl HttpServiceFactory for Service {
 }
 
 fn main() {
-    may::config().set_pool_capacity(3000).set_stack_size(0x5000);
+    may::config().set_pool_capacity(5000).set_stack_size(0x5000);
 
     let (tx, rx) = mpsc::channel();
     TX.set(tx).unwrap();

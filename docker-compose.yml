@@ -32,7 +32,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 25M
+          memory: 50M
           cpus: "0.3"
 
   backend1:
@@ -50,7 +50,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 50M
+          memory: 75M
           cpus: "0.4"
 
   backend2:
@@ -68,7 +68,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 50M
+          memory: 75M
           cpus: "0.4"
 
   backend3:
@@ -86,7 +86,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 50M
+          memory: 75M
           cpus: "0.4"
 
   backend4:
@@ -104,7 +104,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 50M
+          memory: 75M
           cpus: "0.4"
 
 volumes:
