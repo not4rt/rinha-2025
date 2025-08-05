@@ -15,9 +15,6 @@ use std::time::Duration;
 
 static STATS: LazyLock<Stats> = LazyLock::new(Stats::new);
 static PEER_SOCKET1: LazyLock<String> = LazyLock::new(|| env::var("PEER1_SOCKET").unwrap());
-static PEER_SOCKET2: LazyLock<String> = LazyLock::new(|| env::var("PEER2_SOCKET").unwrap());
-static PEER_SOCKET3: LazyLock<String> = LazyLock::new(|| env::var("PEER3_SOCKET").unwrap());
-static PEER_SOCKET4: LazyLock<String> = LazyLock::new(|| env::var("PEER4_SOCKET").unwrap());
 
 static TX: OnceLock<Sender<([u8; 36], [u8; 18])>> = OnceLock::new();
 static RX: OnceLock<Receiver<([u8; 36], [u8; 18])>> = OnceLock::new();
@@ -478,14 +475,11 @@ impl HttpService for Service {
 
                 let (total_dc, total_da, total_fc, total_fa) = if !from_peer {
                     let (pdc, pda, pfc, pfa) = fetch_peer_summary(&PEER_SOCKET1, path).unwrap();
-                    let (pdc2, pda2, pfc2, pfa2) = fetch_peer_summary(&PEER_SOCKET2, path).unwrap();
-                    let (pdc3, pda3, pfc3, pfa3) = fetch_peer_summary(&PEER_SOCKET3, path).unwrap();
-                    let (pdc4, pda4, pfc4, pfa4) = fetch_peer_summary(&PEER_SOCKET4, path).unwrap();
                     (
-                        dc + pdc + pdc2 + pdc3 + pdc4,
-                        da + pda + pda2 + pda3 + pda4,
-                        fc + pfc + pfc2 + pfc3 + pfc4,
-                        fa + pfa + pfa2 + pfa3 + pfa4,
+                        dc + pdc,
+                        da + pda,
+                        fc + pfc,
+                        fa + pfa,
                     )
                 } else {
                     (dc, da, fc, fa)
@@ -501,9 +495,6 @@ impl HttpService for Service {
                 let from_peer = req.path().contains("from_peer=true");
                 if !from_peer {
                     let _ = purge_peer(&PEER_SOCKET1);
-                    let _ = purge_peer(&PEER_SOCKET2);
-                    let _ = purge_peer(&PEER_SOCKET3);
-                    let _ = purge_peer(&PEER_SOCKET4);
                 }
             }
             _ => {
