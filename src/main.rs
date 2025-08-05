@@ -1,3 +1,5 @@
+#![feature(likely_unlikely)]
+#![feature(cold_path)]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -8,6 +10,7 @@ use may::net::TcpStream;
 use may::sync::mpmc::{self, Receiver, Sender};
 use may_minihttp::{HttpService, HttpServiceFactory, Request, Response};
 use std::env;
+use std::hint::{cold_path, likely};
 use std::io::{self, BufRead, Read, Write};
 use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
@@ -183,6 +186,7 @@ fn process_worker(mut default_pool: Conn) {
                             sleep(Duration::from_millis(1251)); // server is unhealthy
                         }
                         status => {
+                            cold_path();
                             println!(
                                 "Received bad status code {} for correlationId {}",
                                 String::from_utf8_lossy(status),
@@ -214,28 +218,50 @@ struct Service;
 impl HttpService for Service {
     #[inline(always)]
     fn call<S: Read>(&mut self, req: Request<S>, rsp: &mut Response) -> io::Result<()> {
-        match req.path() {
-            "/payments" => {
-                let mut body_reader = req.body();
-                let body = unsafe { body_reader.fill_buf().unwrap_unchecked() };
-                let len = (body.len() - 66).min(32);
+        let path = req.path();
+        if likely(path == "/payments") {
+            let mut body_reader = req.body();
+            let body = unsafe { body_reader.fill_buf().unwrap_unchecked() };
+            let len = (body.len() - 66).min(32);
 
-                let amount: [u8; 32] = unsafe { std::mem::zeroed() };
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        body.as_ptr().add(65),
-                        amount.as_ptr() as *mut u8,
-                        len,
-                    )
-                };
-                let correlation_id: [u8; 36] =
-                    unsafe { body[18..54].try_into().unwrap_unchecked() };
+            let amount: [u8; 32] = unsafe { std::mem::zeroed() };
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    body.as_ptr().add(65),
+                    amount.as_ptr() as *mut u8,
+                    len,
+                )
+            };
+            let correlation_id: [u8; 36] = unsafe { body[18..54].try_into().unwrap_unchecked() };
 
-                unsafe {
-                    let _ = TX.get().unwrap_unchecked().send((correlation_id, amount));
-                };
-            }
+            unsafe {
+                let _ = TX.get().unwrap_unchecked().send((correlation_id, amount));
+            };
+            return Ok(())
+        }
+        match path {
+            // "/payments" => {
+            //     let mut body_reader = req.body();
+            //     let body = unsafe { body_reader.fill_buf().unwrap_unchecked() };
+            //     let len = (body.len() - 66).min(32);
+
+            //     let amount: [u8; 32] = unsafe { std::mem::zeroed() };
+            //     unsafe {
+            //         std::ptr::copy_nonoverlapping(
+            //             body.as_ptr().add(65),
+            //             amount.as_ptr() as *mut u8,
+            //             len,
+            //         )
+            //     };
+            //     let correlation_id: [u8; 36] =
+            //         unsafe { body[18..54].try_into().unwrap_unchecked() };
+
+            //     unsafe {
+            //         let _ = TX.get().unwrap_unchecked().send((correlation_id, amount));
+            //     };
+            // }
             path if path.starts_with("/payments-summary") => {
+                cold_path();
                 let (from_ms, to_ms, from_peer) = parse_query_params(path);
                 let (dc, da, fc, fa) = STATS.get_summary(from_ms, to_ms);
 
@@ -258,6 +284,7 @@ impl HttpService for Service {
                 ).into_bytes());
             }
             "/purge-payments" => {
+                cold_path();
                 STATS.reset();
                 let from_peer = req.path().contains("from_peer=true");
                 if !from_peer {

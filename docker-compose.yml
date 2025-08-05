@@ -7,14 +7,16 @@ services:
         maxconn 20000
       defaults
         mode http
+        option http-keep-alive
       frontend api_frontend
         bind *:80
         default_backend api_backend
       backend api_backend
-        balance static-rr
-        server backend1 /sockets/may.sock.1
-        server backend2 /sockets/may.sock.2
-        server backend3 /sockets/may.sock.3' > /tmp/haproxy.cfg &&
+        balance roundrobin
+        option http-keep-alive
+        server backend1 /sockets/may.sock.1 check
+        server backend2 /sockets/may.sock.2 check
+        server backend3 /sockets/may.sock.3 check' > /tmp/haproxy.cfg &&
       haproxy -f /tmp/haproxy.cfg"
     user: "0"
     ports:
@@ -30,7 +32,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 25M
+          memory: 80M
           cpus: "0.3"
 
   backend1:
