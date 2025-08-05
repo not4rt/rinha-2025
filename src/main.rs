@@ -3,7 +3,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use chrono::{DateTime, FixedOffset, Utc};
 use dashmap::DashMap;
-use may::coroutine::sleep;
+use may::coroutine::{sleep, yield_now};
 use may::net::TcpStream;
 use may::sync::mpmc::{self, Receiver, Sender};
 use may_minihttp::{HttpService, HttpServiceFactory, Request, Response};
@@ -122,96 +122,90 @@ fn process_worker(mut default_pool: Conn) {
     let mut resp_buf = [0u8; 203]; // the response is usually 203 bytes long, except on status code 422 and some other edge cases
 
     loop {
-        match RX.get().unwrap().try_recv() {
-            Ok((correlation_id_bytes, amount_bytes)) => {
-                let now = Utc::now();
-                let correlation_id =
-                    unsafe { std::str::from_utf8_unchecked(&correlation_id_bytes) };
+        let iter = unsafe { RX.get().unwrap_unchecked().iter() };
+        for (correlation_id_bytes, amount_bytes) in iter {
+            let now = Utc::now();
+            let correlation_id = unsafe { std::str::from_utf8_unchecked(&correlation_id_bytes) };
 
-                let amount = unsafe {
-                    let len = (0..amount_bytes.len().min(32))
-                        .find(|&i| amount_bytes[i] == 0)
-                        .unwrap_or(32);
-                    std::str::from_utf8_unchecked(&amount_bytes[..len])
-                };
+            let amount = unsafe {
+                let len = (0..amount_bytes.len())
+                    .find(|&i| amount_bytes[i] == 0)
+                    .unwrap_unchecked();
+                std::str::from_utf8_unchecked(&amount_bytes[..len])
+            };
 
-                let payload_string = [
-                    r#"{"correlationId":""#,
-                    correlation_id,
-                    r#"","amount":""#,
-                    amount,
-                    r#"","requestedAt":""#,
-                    &now.to_rfc3339(),
-                    r#""}"#,
-                ]
-                .concat();
-                let payload = payload_string.as_bytes();
+            let payload_string = [
+                r#"{"correlationId":""#,
+                correlation_id,
+                r#"","amount":""#,
+                amount,
+                r#"","requestedAt":""#,
+                &now.to_rfc3339(),
+                r#""}"#,
+            ]
+            .concat();
+            let payload = payload_string.as_bytes();
 
-                let header = format!(
-                    "POST /payments HTTP/1.1\r\nHost: payment-processor\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
-                    payload.len()
-                );
+            let header = format!(
+                "POST /payments HTTP/1.1\r\nHost: payment-processor\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+                payload.len()
+            );
 
-                let hlen = header.len();
-                let tlen = hlen + payload.len();
-                req_buf[..hlen].copy_from_slice(header.as_bytes());
-                req_buf[hlen..tlen].copy_from_slice(payload);
+            let hlen = header.len();
+            let tlen = hlen + payload.len();
+            req_buf[..hlen].copy_from_slice(header.as_bytes());
+            req_buf[hlen..tlen].copy_from_slice(payload);
 
-                let is_fallback = false;
-                let success;
-                loop {
-                    if default_pool.conn.write_all(&req_buf[..tlen]).is_ok()
-                        && let Ok(n) = default_pool.conn.read(&mut resp_buf)
-                        && n >= 12
-                    {
-                        match &resp_buf[9..12] {
-                            b"200" => {
-                                success = true;
-                                break;
-                            }
-                            b"422" => {
-                                // println!(
-                                //     "Received 422 Unprocessable Entity for correlationId {}",
-                                //     String::from_utf8_lossy(&correlation_id_bytes)
-                                // );
-                                success = true; // 422 means it was processed in the previously request, so probably not a fallbac
-                                default_pool.refresh_connection(); // refresh the connection, because there is a big error message on 422
-                                break;
-                            }
-                            b"500" => {
-                                // println!(
-                                //     "Received 500 Internal Server Error for correlationId {}",
-                                //     String::from_utf8_lossy(&correlation_id_bytes)
-                                // );
-                                sleep(Duration::from_millis(1251)); // server is unhealthy
-                            }
-                            _ => {
-                                // println!(
-                                //     "Received bad status code {} for correlationId {}",
-                                //     String::from_utf8_lossy(status),
-                                //     correlation_id
-                                // );
-                                default_pool.refresh_connection(); // refresh the connection, because it might have an error message
-                            }
+            let is_fallback = false;
+            loop {
+                if default_pool.conn.write_all(&req_buf[..tlen]).is_ok()
+                    && let Ok(n) = default_pool.conn.read(&mut resp_buf)
+                    && n >= 12
+                {
+                    match &resp_buf[9..12] {
+                        b"200" => {
+                            break;
                         }
-                    } else {
-                        // println!(
-                        //     "Connection failed for correlationId {}",
-                        //     String::from_utf8_lossy(&correlation_id_bytes)
-                        // );
-
-                        default_pool.refresh_connection(); // refresh the connection, because it might have data left in the buffer
-                        sleep(Duration::from_millis(1));
+                        b"422" => {
+                            // println!(
+                            //     "Received 422 Unprocessable Entity for correlationId {}",
+                            //     String::from_utf8_lossy(&correlation_id_bytes)
+                            // );
+                            // 422 means it was processed in the previously request, so probably not a fallback
+                            default_pool.refresh_connection(); // refresh the connection, because there is a big error message on 422
+                            break;
+                        }
+                        b"500" => {
+                            // println!(
+                            //     "Received 500 Internal Server Error for correlationId {}",
+                            //     String::from_utf8_lossy(&correlation_id_bytes)
+                            // );
+                            sleep(Duration::from_millis(1251)); // server is unhealthy
+                        }
+                        status => {
+                            println!(
+                                "Received bad status code {} for correlationId {}",
+                                String::from_utf8_lossy(status),
+                                correlation_id
+                            );
+                            default_pool.refresh_connection(); // refresh the connection, because it might have an error message
+                        }
                     }
+                } else {
+                    // println!(
+                    //     "Connection failed for correlationId {}",
+                    //     String::from_utf8_lossy(&correlation_id_bytes)
+                    // );
+                    default_pool.refresh_connection(); // refresh the connection, because it might have data left in the buffer
                 }
 
-                if success {
-                    STATS.record(now, parse_amount_cents(amount), is_fallback);
-                }
+                yield_now();
             }
-            Err(_) => sleep(Duration::from_millis(10)),
+
+            STATS.record(now, parse_amount_cents(amount), is_fallback);
+            yield_now();
         }
-        sleep(Duration::from_millis(1));
+        yield_now();
     }
 }
 

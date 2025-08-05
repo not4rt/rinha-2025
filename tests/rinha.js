@@ -235,6 +235,8 @@ export async function checkPaymentsConsistency() {
     console.warn(`${inconsistencies} inconsistências encontradas.`);
   }
 
+  console.info(`Default: ${backendPaymentsSummary.default.totalRequests} - ${defaultAdminPaymentsSummary.totalRequests}`);
+  console.info(`Fallback: ${backendPaymentsSummary.fallback.totalRequests} - ${fallbackAdminPaymentsSummary.totalRequests}`);
   sleep(10);
 }
 
