@@ -20,7 +20,6 @@ static TX: OnceLock<Sender<([u8; 36], [u8; 32])>> = OnceLock::new();
 static RX: OnceLock<Receiver<([u8; 36], [u8; 32])>> = OnceLock::new();
 
 const DEFAULT_HOST: &str = "payment-processor-default:8080";
-const FALLBACK_HOST: &str = "payment-processor-fallback:8080";
 
 struct Stats {
     records: DashMap<DateTime<Utc>, (u64, bool)>,
@@ -118,7 +117,7 @@ impl Conn {
     }
 }
 
-fn process_worker(mut default_pool: Conn, mut fallback_pool: Conn) {
+fn process_worker(mut default_pool: Conn) {
     let mut req_buf = [0u8; 512];
     let mut resp_buf = [0u8; 203]; // the response is usually 203 bytes long, except on status code 422 and some other edge cases
 
@@ -158,21 +157,11 @@ fn process_worker(mut default_pool: Conn, mut fallback_pool: Conn) {
                 req_buf[..hlen].copy_from_slice(header.as_bytes());
                 req_buf[hlen..tlen].copy_from_slice(payload);
 
-                let mut attempt = 0;
-                let mut is_fallback = false;
+                let is_fallback = false;
                 let success;
                 loop {
-                    let pool = if attempt < 5 {
-                        &mut default_pool
-                    } else {
-                        attempt = 0;
-                        is_fallback = true;
-                        &mut fallback_pool
-                    };
-                    let conn = &mut pool.conn;
-
-                    if conn.write_all(&req_buf[..tlen]).is_ok()
-                        && let Ok(n) = conn.read(&mut resp_buf)
+                    if default_pool.conn.write_all(&req_buf[..tlen]).is_ok()
+                        && let Ok(n) = default_pool.conn.read(&mut resp_buf)
                         && n >= 12
                     {
                         match &resp_buf[9..12] {
@@ -185,9 +174,8 @@ fn process_worker(mut default_pool: Conn, mut fallback_pool: Conn) {
                                 //     "Received 422 Unprocessable Entity for correlationId {}",
                                 //     String::from_utf8_lossy(&correlation_id_bytes)
                                 // );
-                                success = true;
-                                is_fallback = false; // 422 means it was processed in the previously request, so probably not a fallbac
-                                pool.refresh_connection(); // refresh the connection, because there is a big error message on 422
+                                success = true; // 422 means it was processed in the previously request, so probably not a fallbac
+                                default_pool.refresh_connection(); // refresh the connection, because there is a big error message on 422
                                 break;
                             }
                             b"500" => {
@@ -195,7 +183,6 @@ fn process_worker(mut default_pool: Conn, mut fallback_pool: Conn) {
                                 //     "Received 500 Internal Server Error for correlationId {}",
                                 //     String::from_utf8_lossy(&correlation_id_bytes)
                                 // );
-                                attempt += 1;
                                 sleep(Duration::from_millis(1251)); // server is unhealthy
                             }
                             _ => {
@@ -204,7 +191,7 @@ fn process_worker(mut default_pool: Conn, mut fallback_pool: Conn) {
                                 //     String::from_utf8_lossy(status),
                                 //     correlation_id
                                 // );
-                                pool.refresh_connection(); // refresh the connection, because it might have an error message
+                                default_pool.refresh_connection(); // refresh the connection, because it might have an error message
                             }
                         }
                     } else {
@@ -213,7 +200,7 @@ fn process_worker(mut default_pool: Conn, mut fallback_pool: Conn) {
                         //     String::from_utf8_lossy(&correlation_id_bytes)
                         // );
 
-                        pool.refresh_connection(); // refresh the connection, because it might have data left in the buffer
+                        default_pool.refresh_connection(); // refresh the connection, because it might have data left in the buffer
                         sleep(Duration::from_millis(1));
                     }
                 }
@@ -445,8 +432,7 @@ fn main() {
     RX.set(rx).unwrap();
 
     let default_pool = Conn::new(DEFAULT_HOST);
-    let fallback_pool = Conn::new(FALLBACK_HOST);
-    may::go!(move || process_worker(default_pool, fallback_pool));
+    may::go!(move || process_worker(default_pool));
 
     let socket = env::var("SOCKET_PATH").unwrap();
     let socket = std::path::Path::new(&socket);
