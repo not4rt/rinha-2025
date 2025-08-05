@@ -1,3 +1,4 @@
+#![feature(likely_unlikely)]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -9,6 +10,7 @@ use may::sync::mpsc::{self, Receiver, Sender};
 use may_minihttp::{HttpService, HttpServiceFactory, Request, Response};
 use std::env;
 use std::fmt::Write as FmtWrite;
+use std::hint::{likely, unlikely};
 use std::io::{self, BufRead, Read, Write};
 use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
@@ -222,7 +224,7 @@ fn process_worker(mut default_pool: Conn) {
                 // };
                 // let conn = &mut pool.conn;
 
-                if default_pool.conn.write_all(&req_buf[..tlen]).is_err() {
+                if unlikely(default_pool.conn.write_all(&req_buf[..tlen]).is_err()) {
                     // println!("Refresh connection - Error on write_all: {e:?}");
                     default_pool.refresh_connection();
                     continue;
@@ -447,61 +449,110 @@ struct Service;
 impl HttpService for Service {
     #[inline(always)]
     fn call<S: Read>(&mut self, req: Request<S>, rsp: &mut Response) -> io::Result<()> {
-        match req.path() {
-            "/payments" => {
-                let mut body_reader = req.body();
-                let body = unsafe { body_reader.fill_buf().unwrap_unchecked() };
-                let len = (body.len() - 66).min(18); // this will corrupt amount if it is more than 18 bytes long
+        let path = req.path();
+        if likely(path == "/payments") {
+            let mut body_reader = req.body();
+            let body = unsafe { body_reader.fill_buf().unwrap_unchecked() };
+            let len = (body.len() - 66).min(18); // this will corrupt amount if it is more than 18 bytes long
 
-                let amount: [u8; 18] = unsafe { std::mem::zeroed() };
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        body.as_ptr().add(65),
-                        amount.as_ptr() as *mut u8,
-                        len,
-                    )
-                };
+            let amount: [u8; 18] = unsafe { std::mem::zeroed() };
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    body.as_ptr().add(65),
+                    amount.as_ptr() as *mut u8,
+                    len,
+                )
+            };
 
-                unsafe {
-                    let _ = TX
-                        .get()
-                        .unwrap_unchecked()
-                        .send((body[18..54].try_into().unwrap_unchecked(), amount));
-                };
-            }
-            path if path.starts_with("/payments-summary") => {
-                let (from_ms, to_ms, from_peer) = parse_query_params(path);
-                let (dc, da, fc, fa) = STATS.get_summary(from_ms, to_ms);
+            unsafe {
+                let _ = TX
+                    .get()
+                    .unwrap_unchecked()
+                    .send((body[18..54].try_into().unwrap_unchecked(), amount));
+            };
+            return Ok(());
+        }
 
-                let (total_dc, total_da, total_fc, total_fa) = if !from_peer {
-                    let (pdc, pda, pfc, pfa) = fetch_peer_summary(&PEER_SOCKET1, path).unwrap();
-                    (
-                        dc + pdc,
-                        da + pda,
-                        fc + pfc,
-                        fa + pfa,
-                    )
-                } else {
-                    (dc, da, fc, fa)
-                };
+        if unlikely(path.starts_with("/payments-summary")) {
+            let (from_ms, to_ms, from_peer) = parse_query_params(path);
+            let (dc, da, fc, fa) = STATS.get_summary(from_ms, to_ms);
 
-                rsp.header("Content-Type: application/json").body_vec(format!(
+            let (total_dc, total_da, total_fc, total_fa) = if !from_peer {
+                let (pdc, pda, pfc, pfa) = fetch_peer_summary(&PEER_SOCKET1, path).unwrap();
+                (dc + pdc, da + pda, fc + pfc, fa + pfa)
+            } else {
+                (dc, da, fc, fa)
+            };
+
+            rsp.header("Content-Type: application/json").body_vec(format!(
                     r#"{{"default":{{"totalRequests":{},"totalAmount":{:.2}}},"fallback":{{"totalRequests":{},"totalAmount":{:.2}}}}}"#,
                     total_dc, total_da as f64 / 100.0, total_fc, total_fa as f64 / 100.0
                 ).into_bytes());
-            }
-            "/purge-payments" => {
-                STATS.reset();
-                let from_peer = req.path().contains("from_peer=true");
-                if !from_peer {
-                    let _ = purge_peer(&PEER_SOCKET1);
-                }
-            }
-            _ => {
-                rsp.status_code(404, "Not Found");
-            }
+            return Ok(());
         }
+
+        if unlikely(path == "/purge-payments") {
+            STATS.reset();
+            let from_peer = req.path().contains("from_peer=true");
+            if !from_peer {
+                let _ = purge_peer(&PEER_SOCKET1);
+            }
+            return Ok(());
+        }
+
+        rsp.status_code(404, "Not Found");
         Ok(())
+
+        // match path {
+        //     "/payments" => {
+        //         let mut body_reader = req.body();
+        //         let body = unsafe { body_reader.fill_buf().unwrap_unchecked() };
+        //         let len = (body.len() - 66).min(18); // this will corrupt amount if it is more than 18 bytes long
+
+        //         let amount: [u8; 18] = unsafe { std::mem::zeroed() };
+        //         unsafe {
+        //             std::ptr::copy_nonoverlapping(
+        //                 body.as_ptr().add(65),
+        //                 amount.as_ptr() as *mut u8,
+        //                 len,
+        //             )
+        //         };
+
+        //         unsafe {
+        //             let _ = TX
+        //                 .get()
+        //                 .unwrap_unchecked()
+        //                 .send((body[18..54].try_into().unwrap_unchecked(), amount));
+        //         };
+        //     }
+        //     path if path.starts_with("/payments-summary") => {
+        //         let (from_ms, to_ms, from_peer) = parse_query_params(path);
+        //         let (dc, da, fc, fa) = STATS.get_summary(from_ms, to_ms);
+
+        //         let (total_dc, total_da, total_fc, total_fa) = if !from_peer {
+        //             let (pdc, pda, pfc, pfa) = fetch_peer_summary(&PEER_SOCKET1, path).unwrap();
+        //             (dc + pdc, da + pda, fc + pfc, fa + pfa)
+        //         } else {
+        //             (dc, da, fc, fa)
+        //         };
+
+        //         rsp.header("Content-Type: application/json").body_vec(format!(
+        //             r#"{{"default":{{"totalRequests":{},"totalAmount":{:.2}}},"fallback":{{"totalRequests":{},"totalAmount":{:.2}}}}}"#,
+        //             total_dc, total_da as f64 / 100.0, total_fc, total_fa as f64 / 100.0
+        //         ).into_bytes());
+        //     }
+        //     "/purge-payments" => {
+        //         STATS.reset();
+        //         let from_peer = req.path().contains("from_peer=true");
+        //         if !from_peer {
+        //             let _ = purge_peer(&PEER_SOCKET1);
+        //         }
+        //     }
+        //     _ => {
+        //         rsp.status_code(404, "Not Found");
+        //     }
+        // }
+        // Ok(())
     }
 }
 
