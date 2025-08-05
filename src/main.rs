@@ -17,6 +17,7 @@ static STATS: LazyLock<Stats> = LazyLock::new(Stats::new);
 static PEER_SOCKET1: LazyLock<String> = LazyLock::new(|| env::var("PEER1_SOCKET").unwrap());
 static PEER_SOCKET2: LazyLock<String> = LazyLock::new(|| env::var("PEER2_SOCKET").unwrap());
 static PEER_SOCKET3: LazyLock<String> = LazyLock::new(|| env::var("PEER3_SOCKET").unwrap());
+static PEER_SOCKET4: LazyLock<String> = LazyLock::new(|| env::var("PEER4_SOCKET").unwrap());
 
 static TX: OnceLock<Sender<([u8; 36], [u8; 18])>> = OnceLock::new();
 static RX: OnceLock<Receiver<([u8; 36], [u8; 18])>> = OnceLock::new();
@@ -167,7 +168,7 @@ impl Conn {
 
     #[inline(always)]
     fn refresh_connection(&mut self) {
-        println!("Refreshing connection");
+        // println!("Refreshing connection");
         let conn = new_connection(self.host);
         self.conn = conn;
     }
@@ -224,8 +225,8 @@ fn process_worker(mut default_pool: Conn) {
                 // };
                 // let conn = &mut pool.conn;
 
-                if let Err(e) = default_pool.conn.write_all(&req_buf[..tlen]) {
-                    println!("Refresh connection - Error on write_all: {e:?}");
+                if default_pool.conn.write_all(&req_buf[..tlen]).is_err() {
+                    // println!("Refresh connection - Error on write_all: {e:?}");
                     default_pool.refresh_connection();
                     continue;
                 }
@@ -236,7 +237,7 @@ fn process_worker(mut default_pool: Conn) {
                 loop {
                     match default_pool.conn.read(&mut resp_buf[total_read..]) {
                         Ok(0) => {
-                            println!("Refresh connection - read returned 0");
+                            // println!("Refresh connection - read returned 0");
                             default_pool.refresh_connection();
                             break;
                         }
@@ -252,8 +253,8 @@ fn process_worker(mut default_pool: Conn) {
                                 break;
                             }
                         }
-                        Err(e) => {
-                            println!("Refresh connection - Error on read: {e:?}");
+                        Err(_) => {
+                            // println!("Refresh connection - Error on read: {e:?}");
                             default_pool.refresh_connection();
                             break;
                         }
@@ -307,11 +308,11 @@ fn process_worker(mut default_pool: Conn) {
                             &mut discard_buf,
                         );
                     }
-                    status => {
-                        println!(
-                            "Refresh connection - Unknown status code: {}",
-                            String::from_utf8_lossy(status)
-                        );
+                    _ => {
+                        // println!(
+                        //     "Refresh connection - Unknown status code: {}",
+                        //     String::from_utf8_lossy(status)
+                        // );
                         default_pool.refresh_connection();
                     }
                 }
@@ -494,11 +495,12 @@ impl HttpService for Service {
                     let (pdc, pda, pfc, pfa) = fetch_peer_summary(&PEER_SOCKET1, path).unwrap();
                     let (pdc2, pda2, pfc2, pfa2) = fetch_peer_summary(&PEER_SOCKET2, path).unwrap();
                     let (pdc3, pda3, pfc3, pfa3) = fetch_peer_summary(&PEER_SOCKET3, path).unwrap();
+                    let (pdc4, pda4, pfc4, pfa4) = fetch_peer_summary(&PEER_SOCKET4, path).unwrap();
                     (
-                        dc + pdc + pdc2 + pdc3,
-                        da + pda + pda2 + pda3,
-                        fc + pfc + pfc2 + pfc3,
-                        fa + pfa + pfa2 + pfa3,
+                        dc + pdc + pdc2 + pdc3 + pdc4,
+                        da + pda + pda2 + pda3 + pda4,
+                        fc + pfc + pfc2 + pfc3 + pfc4,
+                        fa + pfa + pfa2 + pfa3 + pfa4,
                     )
                 } else {
                     (dc, da, fc, fa)
@@ -516,6 +518,7 @@ impl HttpService for Service {
                     let _ = purge_peer(&PEER_SOCKET1);
                     let _ = purge_peer(&PEER_SOCKET2);
                     let _ = purge_peer(&PEER_SOCKET3);
+                    let _ = purge_peer(&PEER_SOCKET4);
                 }
             }
             _ => {
