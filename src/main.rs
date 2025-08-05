@@ -234,13 +234,12 @@ impl HttpService for Service {
                         len,
                     )
                 };
-                let correlation_id: [u8; 36] = unsafe { body[18..54].try_into().unwrap_unchecked() };
+                let correlation_id: [u8; 36] =
+                    unsafe { body[18..54].try_into().unwrap_unchecked() };
 
-                may::go!(move || {
-                    unsafe {
-                        let _ = TX.get().unwrap_unchecked().send((correlation_id, amount));
-                    };
-                });
+                unsafe {
+                    let _ = TX.get().unwrap_unchecked().send((correlation_id, amount));
+                };
             }
             path if path.starts_with("/payments-summary") => {
                 let (from_ms, to_ms, from_peer) = parse_query_params(path);
