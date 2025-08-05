@@ -3,7 +3,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use chrono::{DateTime, FixedOffset, Utc};
 use dashmap::DashMap;
-use may::coroutine::sleep;
+use may::coroutine::{sleep, yield_now};
 use may::net::TcpStream;
 use may::sync::mpsc::{self, Receiver, Sender};
 use may_minihttp::{HttpService, HttpServiceFactory, Request, Response};
@@ -259,30 +259,23 @@ fn process_worker(mut default_pool: Conn) {
                             break;
                         }
                     }
+
+                    yield_now();
                 }
 
                 if headers_end == 0 || total_read < 12 {
+                    yield_now();
                     continue;
                 }
 
                 let status = get_status_code(&resp_buf).unwrap_or(&[0, 0, 0]);
                 match status {
                     b"200" => {
-                        if total_read > headers_end {
-                            let headers =
-                                unsafe { std::str::from_utf8_unchecked(&resp_buf[..headers_end]) };
-                            consume_response_body(
-                                &mut default_pool.conn,
-                                headers,
-                                headers_end,
-                                total_read,
-                                &resp_buf,
-                                &mut discard_buf,
-                            );
-                        }
+                        STATS.record(now, parse_amount_cents(amount), is_fallback);
                         break;
                     }
                     b"422" => {
+                        STATS.record(now, parse_amount_cents(amount), is_fallback);
                         let headers =
                             unsafe { std::str::from_utf8_unchecked(&resp_buf[..headers_end]) };
                         consume_response_body(
@@ -297,16 +290,6 @@ fn process_worker(mut default_pool: Conn) {
                     }
                     b"500" => {
                         sleep(Duration::from_millis(1251));
-                        let headers =
-                            unsafe { std::str::from_utf8_unchecked(&resp_buf[..headers_end]) };
-                        consume_response_body(
-                            &mut default_pool.conn,
-                            headers,
-                            headers_end,
-                            total_read,
-                            &resp_buf,
-                            &mut discard_buf,
-                        );
                     }
                     _ => {
                         // println!(
@@ -316,11 +299,13 @@ fn process_worker(mut default_pool: Conn) {
                         default_pool.refresh_connection();
                     }
                 }
+
+                yield_now();
             }
 
-            STATS.record(now, parse_amount_cents(amount), is_fallback);
-            sleep(Duration::from_millis(1));
+            yield_now();
         }
+        yield_now();
     }
 }
 
