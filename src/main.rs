@@ -1,5 +1,4 @@
 #![feature(likely_unlikely)]
-#![feature(cold_path)]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -10,7 +9,7 @@ use may::net::TcpStream;
 use may::sync::mpmc::{self, Receiver, Sender};
 use may_minihttp::{HttpService, HttpServiceFactory, Request, Response};
 use std::env;
-use std::hint::{cold_path, likely};
+use std::hint::{likely, unlikely};
 use std::io::{self, BufRead, Read, Write};
 use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
@@ -19,8 +18,8 @@ static STATS: LazyLock<Stats> = LazyLock::new(Stats::new);
 static PEER_SOCKET1: LazyLock<String> = LazyLock::new(|| env::var("PEER1_SOCKET").unwrap());
 static PEER_SOCKET2: LazyLock<String> = LazyLock::new(|| env::var("PEER2_SOCKET").unwrap());
 
-static TX: OnceLock<Sender<([u8; 36], [u8; 32])>> = OnceLock::new();
-static RX: OnceLock<Receiver<([u8; 36], [u8; 32])>> = OnceLock::new();
+static TX: OnceLock<Sender<([u8; 36], [u8; 16])>> = OnceLock::new();
+static RX: OnceLock<Receiver<([u8; 36], [u8; 16])>> = OnceLock::new();
 
 const DEFAULT_HOST: &str = "payment-processor-default:8080";
 
@@ -161,7 +160,7 @@ fn process_worker(mut default_pool: Conn) {
 
             let is_fallback = false;
             loop {
-                if default_pool.conn.write_all(&req_buf[..tlen]).is_ok()
+                if likely(default_pool.conn.write_all(&req_buf[..tlen]).is_ok())
                     && let Ok(n) = default_pool.conn.read(&mut resp_buf)
                     && n >= 12
                 {
@@ -186,7 +185,6 @@ fn process_worker(mut default_pool: Conn) {
                             sleep(Duration::from_millis(1251)); // server is unhealthy
                         }
                         status => {
-                            cold_path();
                             println!(
                                 "Received bad status code {} for correlationId {}",
                                 String::from_utf8_lossy(status),
@@ -222,9 +220,9 @@ impl HttpService for Service {
         if likely(path == "/payments") {
             let mut body_reader = req.body();
             let body = unsafe { body_reader.fill_buf().unwrap_unchecked() };
-            let len = (body.len() - 66).min(32);
+            let len = (body.len() - 66).min(18); // this will corrupt amount if it is more than 18 bytes long
 
-            let amount: [u8; 32] = unsafe { std::mem::zeroed() };
+            let amount: [u8; 16] = unsafe { std::mem::zeroed() };
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     body.as_ptr().add(65),
@@ -232,71 +230,104 @@ impl HttpService for Service {
                     len,
                 )
             };
-            let correlation_id: [u8; 36] = unsafe { body[18..54].try_into().unwrap_unchecked() };
 
             unsafe {
-                let _ = TX.get().unwrap_unchecked().send((correlation_id, amount));
+                let _ = TX
+                    .get()
+                    .unwrap_unchecked()
+                    .send((body[18..54].try_into().unwrap_unchecked(), amount));
             };
-            return Ok(())
+            return Ok(());
         }
-        match path {
-            // "/payments" => {
-            //     let mut body_reader = req.body();
-            //     let body = unsafe { body_reader.fill_buf().unwrap_unchecked() };
-            //     let len = (body.len() - 66).min(32);
 
-            //     let amount: [u8; 32] = unsafe { std::mem::zeroed() };
-            //     unsafe {
-            //         std::ptr::copy_nonoverlapping(
-            //             body.as_ptr().add(65),
-            //             amount.as_ptr() as *mut u8,
-            //             len,
-            //         )
-            //     };
-            //     let correlation_id: [u8; 36] =
-            //         unsafe { body[18..54].try_into().unwrap_unchecked() };
+        if unlikely(path.starts_with("/payments-summary")) {
+            let (from_ms, to_ms, from_peer) = parse_query_params(path);
+            let (dc, da, fc, fa) = STATS.get_summary(from_ms, to_ms);
 
-            //     unsafe {
-            //         let _ = TX.get().unwrap_unchecked().send((correlation_id, amount));
-            //     };
-            // }
-            path if path.starts_with("/payments-summary") => {
-                cold_path();
-                let (from_ms, to_ms, from_peer) = parse_query_params(path);
-                let (dc, da, fc, fa) = STATS.get_summary(from_ms, to_ms);
+            let (total_dc, total_da, total_fc, total_fa) = if !from_peer {
+                let (pdc, pda, pfc, pfa) = fetch_peer_summary(&PEER_SOCKET1, path).unwrap();
+                (dc + pdc, da + pda, fc + pfc, fa + pfa)
+            } else {
+                (dc, da, fc, fa)
+            };
 
-                let (total_dc, total_da, total_fc, total_fa) = if !from_peer {
-                    let (pdc, pda, pfc, pfa) = fetch_peer_summary(&PEER_SOCKET1, path).unwrap();
-                    let (pdc2, pda2, pfc2, pfa2) = fetch_peer_summary(&PEER_SOCKET2, path).unwrap();
-                    (
-                        dc + pdc + pdc2,
-                        da + pda + pda2,
-                        fc + pfc + pfc2,
-                        fa + pfa + pfa2,
-                    )
-                } else {
-                    (dc, da, fc, fa)
-                };
-
-                rsp.header("Content-Type: application/json").body_vec(format!(
+            rsp.header("Content-Type: application/json").body_vec(format!(
                     r#"{{"default":{{"totalRequests":{},"totalAmount":{:.2}}},"fallback":{{"totalRequests":{},"totalAmount":{:.2}}}}}"#,
                     total_dc, total_da as f64 / 100.0, total_fc, total_fa as f64 / 100.0
                 ).into_bytes());
-            }
-            "/purge-payments" => {
-                cold_path();
-                STATS.reset();
-                let from_peer = req.path().contains("from_peer=true");
-                if !from_peer {
-                    let _ = purge_peer(&PEER_SOCKET1);
-                    let _ = purge_peer(&PEER_SOCKET2);
-                }
-            }
-            _ => {
-                rsp.status_code(404, "Not Found");
-            }
+            return Ok(());
         }
+
+        if unlikely(path == "/purge-payments") {
+            STATS.reset();
+            let from_peer = req.path().contains("from_peer=true");
+            if !from_peer {
+                let _ = purge_peer(&PEER_SOCKET1);
+            }
+            return Ok(());
+        }
+
+        rsp.status_code(404, "Not Found");
         Ok(())
+        
+        // match path {
+        //     "/payments" => {
+        //         let mut body_reader = req.body();
+        //         let body = unsafe { body_reader.fill_buf().unwrap_unchecked() };
+        //         let len = (body.len() - 66).min(32);
+
+        //         let amount: [u8; 16] = unsafe { std::mem::zeroed() };
+        //         unsafe {
+        //             std::ptr::copy_nonoverlapping(
+        //                 body.as_ptr().add(65),
+        //                 amount.as_ptr() as *mut u8,
+        //                 len,
+        //             )
+        //         };
+        //         let correlation_id: [u8; 36] =
+        //             unsafe { body[18..54].try_into().unwrap_unchecked() };
+
+        //         unsafe {
+        //             let _ = TX.get().unwrap_unchecked().send((correlation_id, amount));
+        //         };
+        //     }
+        //     path if path.starts_with("/payments-summary") => {
+        //         cold_path();
+        //         let (from_ms, to_ms, from_peer) = parse_query_params(path);
+        //         let (dc, da, fc, fa) = STATS.get_summary(from_ms, to_ms);
+
+        //         let (total_dc, total_da, total_fc, total_fa) = if !from_peer {
+        //             let (pdc, pda, pfc, pfa) = fetch_peer_summary(&PEER_SOCKET1, path).unwrap();
+        //             let (pdc2, pda2, pfc2, pfa2) = fetch_peer_summary(&PEER_SOCKET2, path).unwrap();
+        //             (
+        //                 dc + pdc + pdc2,
+        //                 da + pda + pda2,
+        //                 fc + pfc + pfc2,
+        //                 fa + pfa + pfa2,
+        //             )
+        //         } else {
+        //             (dc, da, fc, fa)
+        //         };
+
+        //         rsp.header("Content-Type: application/json").body_vec(format!(
+        //             r#"{{"default":{{"totalRequests":{},"totalAmount":{:.2}}},"fallback":{{"totalRequests":{},"totalAmount":{:.2}}}}}"#,
+        //             total_dc, total_da as f64 / 100.0, total_fc, total_fa as f64 / 100.0
+        //         ).into_bytes());
+        //     }
+        //     "/purge-payments" => {
+        //         cold_path();
+        //         STATS.reset();
+        //         let from_peer = req.path().contains("from_peer=true");
+        //         if !from_peer {
+        //             let _ = purge_peer(&PEER_SOCKET1);
+        //             let _ = purge_peer(&PEER_SOCKET2);
+        //         }
+        //     }
+        //     _ => {
+        //         rsp.status_code(404, "Not Found");
+        //     }
+        // }
+        // Ok(())
     }
 }
 
