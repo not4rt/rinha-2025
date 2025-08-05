@@ -119,6 +119,7 @@ impl Conn {
     }
 }
 
+#[inline]
 fn process_worker(mut default_pool: Conn) {
     let mut req_buf = [0u8; 512];
     let mut resp_buf = [0u8; 203]; // the response is usually 203 bytes long, except on status code 422 and some other edge cases
