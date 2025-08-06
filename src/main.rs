@@ -5,28 +5,29 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 use chrono::{DateTime, FixedOffset, Utc};
 use dashmap::DashMap;
 use may::coroutine::{sleep, yield_now};
-use may::net::TcpStream;
 use may::os::unix::net::UnixStream;
 use may::sync::Mutex;
-use may::sync::mpsc::{self, Receiver, Sender};
+use may::sync::spsc::{self, Receiver, Sender};
 use may_minihttp::{HttpService, HttpServiceFactory, Request, Response};
 use std::env;
-use std::fmt::Write as FmtWrite;
-use std::hint::{likely, unlikely};
+use std::hint::unlikely;
 use std::io::{self, BufRead, Read, Write};
 use std::sync::{LazyLock, OnceLock};
 use std::time::Duration;
+use ureq::Agent;
 
 static STATS: LazyLock<Stats> = LazyLock::new(Stats::new);
-static PEER_SOCKET1: LazyLock<String> = LazyLock::new(|| env::var("PEER1_SOCKET").unwrap());
-static PEER_CONN: LazyLock<Mutex<UnixStream>> =
-    LazyLock::new(|| Mutex::new(UnixStream::connect(PEER_SOCKET1.to_owned()).unwrap()));
+static PEER1_SOCKET: LazyLock<String> = LazyLock::new(|| env::var("PEER1_SOCKET").unwrap());
+static PEER1_CONN: LazyLock<Mutex<UnixStream>> =
+    LazyLock::new(|| Mutex::new(UnixStream::connect(PEER1_SOCKET.to_owned()).unwrap()));
+static PEER2_SOCKET: LazyLock<String> = LazyLock::new(|| env::var("PEER2_SOCKET").unwrap());
+static PEER2_CONN: LazyLock<Mutex<UnixStream>> =
+    LazyLock::new(|| Mutex::new(UnixStream::connect(PEER2_SOCKET.to_owned()).unwrap()));
 
-static TX: OnceLock<Sender<([u8; 36], [u8; 18])>> = OnceLock::new();
-static RX: OnceLock<Receiver<([u8; 36], [u8; 18])>> = OnceLock::new();
+static TX: OnceLock<Sender<([u8; 128], u8)>> = OnceLock::new();
+static RX: OnceLock<Receiver<([u8; 128], u8)>> = OnceLock::new();
 
-const DEFAULT_HOST: &str = "payment-processor-default:8080";
-// const FALLBACK_HOST: &str = "payment-processor-fallback:8080";
+const DEFAULT_URL: &str = "http://payment-processor-default:8080/payments";
 
 #[repr(C)]
 struct Stats {
@@ -92,217 +93,117 @@ impl Stats {
 }
 
 #[inline(always)]
-fn new_connection(host: &str) -> TcpStream {
-    let stream = unsafe { TcpStream::connect(host).unwrap_unchecked() };
-    unsafe {
-        stream.set_nodelay(true).unwrap_unchecked();
-        stream
-            .set_read_timeout(Some(Duration::from_millis(250)))
-            .unwrap_unchecked();
-        stream
-            .set_write_timeout(Some(Duration::from_millis(250)))
-            .unwrap_unchecked();
-    }
-    stream
-}
+unsafe fn new_parse_amount_cents(buf: *const u8, start: usize, end: usize) -> u64 {
+    let mut whole = 0u64;
+    let mut decimal = 0u64;
+    let mut is_decimal = false;
+    let mut decimal_places = 0;
 
-struct BufferWriter<'a> {
-    buf: &'a mut [u8],
-    pos: usize,
-}
-
-impl<'a> BufferWriter<'a> {
-    #[inline(always)]
-    fn new(buf: &'a mut [u8]) -> Self {
-        Self { buf, pos: 0 }
-    }
-
-    #[inline(always)]
-    fn len(&self) -> usize {
-        self.pos
-    }
-
-    #[inline(always)]
-    fn write_bytes(&mut self, bytes: &[u8]) -> bool {
-        if self.pos + bytes.len() <= self.buf.len() {
-            self.buf[self.pos..self.pos + bytes.len()].copy_from_slice(bytes);
-            self.pos += bytes.len();
-            true
-        } else {
-            false
+    for i in start..end {
+        let c = *buf.add(i);
+        if c == b'.' {
+            is_decimal = true;
+        } else if c >= b'0' && c <= b'9' {
+            if is_decimal {
+                if decimal_places < 2 {
+                    decimal = decimal * 10 + (c - b'0') as u64;
+                    decimal_places += 1;
+                }
+            } else {
+                whole = whole * 10 + (c - b'0') as u64;
+            }
         }
     }
 
-    #[inline(always)]
-    fn write_number(&mut self, num: usize) -> bool {
-        let mut itoa_buf = itoa::Buffer::new();
-        let num_str = itoa_buf.format(num);
-        self.write_bytes(num_str.as_bytes())
+    if decimal_places == 1 {
+        decimal *= 10;
     }
 
-    #[inline(always)]
-    fn write_http_header(&mut self, prefix: &[u8], content_length: usize, suffix: &[u8]) -> bool {
-        self.write_bytes(prefix) && self.write_number(content_length) && self.write_bytes(suffix)
-    }
-}
-
-impl<'a> FmtWrite for BufferWriter<'a> {
-    #[inline(always)]
-    fn write_str(&mut self, s: &str) -> std::fmt::Result {
-        if self.write_bytes(s.as_bytes()) {
-            Ok(())
-        } else {
-            Err(std::fmt::Error)
-        }
-    }
-}
-
-#[repr(C)]
-struct Conn {
-    conn: TcpStream,
-    host: &'static str,
-}
-
-impl Conn {
-    fn new(host: &'static str) -> Self {
-        let conn = new_connection(host);
-        Self { conn, host }
-    }
-
-    #[inline(always)]
-    fn refresh_connection(&mut self) {
-        // println!("Refreshing connection");
-        let conn = new_connection(self.host);
-        self.conn = conn;
-    }
+    whole * 100 + decimal
 }
 
 #[inline]
-fn process_worker(mut default_pool: Conn) {
-    let mut req_buf = [0u8; 512];
-    let mut resp_buf = [0u8; 256];
-    let mut payload_buf = [0u8; 128];
+fn process_worker() {
+    let mut req_buf = [0u8; 256];
+
+    let agent: Agent = Agent::config_builder()
+        .max_idle_connections(200)
+        .max_idle_connections_per_host(200)
+        .max_idle_age(Duration::from_secs(600))
+        .timeout_global(Some(Duration::from_millis(100)))
+        .no_delay(true)
+        .http_status_as_error(false)
+        .build()
+        .into();
+
+    const SUFFIX_PREFIX: &[u8] = b",\"requestedAt\":\"";
+    const SUFFIX_SUFFIX: &[u8] = b"\"}";
 
     loop {
-        let iter = unsafe { RX.get().unwrap_unchecked().iter() };
-        for (correlation_id_bytes, amount_bytes) in iter {
-            let now = Utc::now();
-            let rfc3339_time = now.to_rfc3339();
-            let correlation_id = unsafe { std::str::from_utf8_unchecked(&correlation_id_bytes) };
+        let (body_bytes, body_len) = unsafe { RX.get().unwrap_unchecked().recv().unwrap() };
+        let now = Utc::now();
+        let rfc339 = now.to_rfc3339();
+        let body_len = body_len as usize;
 
-            let amount = unsafe {
-                let len = (0..amount_bytes.len())
-                    .find(|&i| amount_bytes[i] == 0)
-                    .unwrap_or(18);
-                std::str::from_utf8_unchecked(&amount_bytes[..len])
+        unsafe {
+            let copy_len = body_len - 1;
+            std::ptr::copy_nonoverlapping(body_bytes.as_ptr(), req_buf.as_mut_ptr(), copy_len);
+
+            std::ptr::copy_nonoverlapping(
+                SUFFIX_PREFIX.as_ptr(),
+                req_buf.as_mut_ptr().add(copy_len),
+                SUFFIX_PREFIX.len(),
+            );
+
+            let timestamp_pos = copy_len + SUFFIX_PREFIX.len();
+            std::ptr::copy_nonoverlapping(
+                rfc339.as_ptr(),
+                req_buf.as_mut_ptr().add(timestamp_pos),
+                rfc339.len(),
+            );
+
+            let final_pos = timestamp_pos + rfc339.len();
+            std::ptr::copy_nonoverlapping(
+                SUFFIX_SUFFIX.as_ptr(),
+                req_buf.as_mut_ptr().add(final_pos),
+                SUFFIX_SUFFIX.len(),
+            );
+
+            let total_len = final_pos + SUFFIX_SUFFIX.len();
+
+            let amount_cents = {
+                let mut i = 65;
+                while i < body_len && body_bytes[i] != b'"' {
+                    i += 1;
+                }
+                new_parse_amount_cents(body_bytes.as_ptr(), 65, i)
             };
 
-            let mut payload_writer = BufferWriter::new(&mut payload_buf);
-            let _ = write!(
-                payload_writer,
-                r#"{{"correlationId":"{correlation_id}","amount":"{amount}","requestedAt":"{rfc3339_time}"}}"#
-            );
-            let payload_len = payload_writer.len();
-
-            let header_template = b"POST /payments HTTP/1.1\r\nHost: payment-processor\r\nContent-Type: application/json\r\nContent-Length: ";
-            let header_suffix = b"\r\nConnection: keep-alive\r\n\r\n";
-
-            let mut header_writer = BufferWriter::new(&mut req_buf);
-            header_writer.write_http_header(header_template, payload_len, header_suffix);
-            let hlen = header_writer.len();
-
-            let tlen = hlen + payload_len;
-            req_buf[hlen..tlen].copy_from_slice(&payload_buf[..payload_len]);
-
-            // let mut attempt = 0;
-            let is_fallback = false;
             loop {
-                if unlikely(default_pool.conn.write_all(&req_buf[..tlen]).is_err()) {
-                    // println!("Refresh connection - Error on write_all: {e:?}");
-                    default_pool.refresh_connection();
-                    continue;
-                }
-
-                let mut total_read = 0;
-                let mut headers_end = 0;
-
-                match default_pool.conn.read(&mut resp_buf[total_read..]) {
-                    Ok(0) => {
-                        // println!("Refresh connection - read returned 0");
-                        default_pool.refresh_connection();
-                    }
-                    Ok(n) => {
-                        total_read += n;
-
-                        headers_end = find_headers_end(&resp_buf[..total_read]).unwrap_or(0);
-                    }
-                    Err(_) => {
-                        // println!("Refresh connection - Error on read: {e:?}");
-                        default_pool.refresh_connection();
-                    }
-                }
-
-                if headers_end == 0 || total_read < 12 {
-                    yield_now();
-                    continue;
-                }
-
-                let status = get_status_code(&resp_buf).unwrap_or(&[0, 0, 0]);
-                match status {
-                    b"200" => {
-                        break;
-                    }
-                    b"422" => {
-                        default_pool.refresh_connection();
-                        break;
-                    }
-                    b"500" => {
-                        sleep(Duration::from_millis(1251));
-                    }
-                    _ => {
-                        // println!(
-                        //     "Refresh connection - Unknown status code: {}",
-                        //     String::from_utf8_lossy(status)
-                        // );
-                        default_pool.refresh_connection();
-                    }
-                }
-
                 yield_now();
+                let response = agent
+                    .post(DEFAULT_URL)
+                    .header("Content-Type", "application/json")
+                    .send(&req_buf[..total_len]);
+
+                if unlikely(response.is_err()) {
+                    continue;
+                }
+
+                match response.unwrap().status().as_u16() {
+                    200 | 422 => break,
+                    500 => {
+                        sleep(Duration::from_millis(1251));
+                        continue;
+                    }
+                    _ => continue,
+                }
             }
 
-            STATS.record(now, parse_amount_cents(amount), is_fallback);
+            STATS.record(now, amount_cents, false);
             yield_now();
         }
         yield_now();
-    }
-}
-
-#[inline(always)]
-fn find_headers_end(buffer: &[u8]) -> Option<usize> {
-    let len = buffer.len();
-    if len < 4 {
-        return None;
-    }
-
-    for i in 0..len - 3 {
-        if buffer[i] == b'\r'
-            && buffer[i + 1] == b'\n'
-            && buffer[i + 2] == b'\r'
-            && buffer[i + 3] == b'\n'
-        {
-            return Some(i + 4);
-        }
-    }
-    None
-}
-
-#[inline(always)]
-fn get_status_code(buffer: &[u8]) -> Option<&[u8; 3]> {
-    if buffer.len() >= 12 {
-        unsafe { Some(&*(buffer.as_ptr().add(9) as *const [u8; 3])) }
-    } else {
-        None
     }
 }
 
@@ -311,55 +212,58 @@ struct Service;
 impl HttpService for Service {
     #[inline(always)]
     fn call<S: Read>(&mut self, req: Request<S>, rsp: &mut Response) -> io::Result<()> {
-        let path = req.path();
-        if likely(path == "/payments") {
-            let mut body_reader = req.body();
-            let body = unsafe { body_reader.fill_buf().unwrap_unchecked() };
-            let len = (body.len() - 66).min(18); // this will corrupt amount if it is more than 18 bytes long
+        let request_path = req.path();
+        match request_path {
+            "/payments" => unsafe {
+                let mut body_reader = req.body();
+                let body = body_reader.fill_buf().unwrap_unchecked();
 
-            let amount: [u8; 18] = unsafe { std::mem::zeroed() };
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    body.as_ptr().add(65),
-                    amount.as_ptr() as *mut u8,
-                    len,
-                )
-            };
+                let mut body_array: [u8; 128] = std::mem::zeroed();
+                let len = body.len();
+                std::ptr::copy_nonoverlapping(body.as_ptr(), body_array.as_mut_ptr(), len);
 
-            unsafe {
-                let _ = TX
-                    .get()
-                    .unwrap_unchecked()
-                    .send((body[18..54].try_into().unwrap_unchecked(), amount));
-            };
-        } else if path.starts_with("/payments-summary") {
-            let (pdc, pda, pfc, pfa) = fetch_peer_summary(&PEER_SOCKET1, path).unwrap();
-            let (from_ms, to_ms) = parse_query_params(path);
-            let (total_dc, total_da, total_fc, total_fa) = {
-                let (dc, da, fc, fa) = STATS.get_summary(from_ms, to_ms);
-                (dc + pdc, da + pda, fc + pfc, fa + pfa)
-            };
+                let _ = TX.get().unwrap_unchecked().send((body_array, len as u8));
+            },
+            path if path.starts_with("/payments-summary") => {
+                let (pdc, pda, pfc, pfa) = fetch_peer_summary(&PEER1_SOCKET, path).unwrap();
+                let (pdc2, pda2, pfc2, pfa2) = fetch_peer_summary(&PEER2_SOCKET, path).unwrap();
+                let (from_ms, to_ms) = parse_query_params(path);
+                let (total_dc, total_da, total_fc, total_fa) = {
+                    let (dc, da, fc, fa) = STATS.get_summary(from_ms, to_ms);
+                    (
+                        dc + pdc + pdc2,
+                        da + pda + pda2,
+                        fc + pfc + pfc2,
+                        fa + pfa + pfa2,
+                    )
+                };
 
-            rsp.header("Content-Type: application/json").body_vec(format!(
+                rsp.header("Content-Type: application/json").body_vec(format!(
                     r#"{{"default":{{"totalRequests":{},"totalAmount":{:.2}}},"fallback":{{"totalRequests":{},"totalAmount":{:.2}}}}}"#,
                     total_dc, total_da as f64 / 100.0, total_fc, total_fa as f64 / 100.0
                 ).into_bytes());
-        } else if path.starts_with("/peer/payments-summary") {
-            let (from_ms, to_ms) = parse_query_params(path);
-            let (total_dc, total_da, total_fc, total_fa) = STATS.get_summary(from_ms, to_ms);
-
-            rsp.header("Content-Type: application/json").body_vec(format!(
-                    r#"{{"default":{{"totalRequests":{},"totalAmount":{:.2}}},"fallback":{{"totalRequests":{},"totalAmount":{:.2}}}}}"#,
-                    total_dc, total_da as f64 / 100.0, total_fc, total_fa as f64 / 100.0
-                ).into_bytes());
-        } else if unlikely(path == "/purge-payments") {
-            STATS.reset();
-            let from_peer = req.path().contains("from_peer=true");
-            if !from_peer {
-                let _ = purge_peer(&PEER_SOCKET1);
             }
-        } else {
-            rsp.status_code(404, "Not Found");
+            path if path.starts_with("/peer") => {
+                let (from_ms, to_ms) = parse_query_params(path);
+                let (total_dc, total_da, total_fc, total_fa) = STATS.get_summary(from_ms, to_ms);
+
+                rsp.header("Content-Type: application/json").body_vec(format!(
+                    r#"{{"default":{{"totalRequests":{},"totalAmount":{:.2}}},"fallback":{{"totalRequests":{},"totalAmount":{:.2}}}}}"#,
+                    total_dc, total_da as f64 / 100.0, total_fc, total_fa as f64 / 100.0
+                ).into_bytes());
+            }
+            path if path.starts_with("/purge-payments") => {
+                STATS.reset();
+                let from_peer = req.path().contains("from_peer=true");
+                if !from_peer {
+                    let _ = purge_peer(&PEER1_CONN);
+                    let _ = purge_peer(&PEER2_CONN);
+                }
+            }
+            _ => {
+                println!("DEBUG: Received request path: '{request_path}'");
+                rsp.status_code(404, "Not Found");
+            }
         }
         Ok(())
     }
@@ -426,28 +330,35 @@ fn parse_amount_cents(amount_str: &str) -> u64 {
     }
 }
 
-fn fetch_peer_summary(socket: &str, path: &str) -> io::Result<(u64, u64, u64, u64)> {
-    let mut peer_conn = PEER_CONN.lock().unwrap();
-    peer_conn.write_all(
-        format!("GET /peer{path} HTTP/1.1\r\nHost: {socket}\r\nConnection: close\r\n\r\n")
-            .as_bytes(),
-    )?;
+fn fetch_peer_summary(
+    socket_path: &LazyLock<String>,
+    path: &str,
+) -> io::Result<(u64, u64, u64, u64)> {
+    let mut peer_conn = UnixStream::connect(socket_path.as_str())?;
+    let request = format!("GET /peer{path} HTTP/1.1\r\nHost: peer\r\nConnection: close\r\n\r\n");
+    peer_conn.write_all(request.as_bytes())?;
 
-    let mut buf = [0u8; 256];
+    let mut buf = [0u8; 512];
+    let bytes_read = peer_conn.read(&mut buf)?;
 
-    let _ = peer_conn.read(&mut buf).unwrap();
+    let response_str = String::from_utf8_lossy(&buf[..bytes_read]);
+    println!("Request to peer: {request}");
+    println!("Response from peer: {}", response_str);
 
-    if let Some(body_start) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-        let body_str = unsafe { std::str::from_utf8_unchecked(&buf[body_start + 4..]) };
+    if let Some(body_start) = buf[..bytes_read].windows(4).position(|w| w == b"\r\n\r\n") {
+        let body_str = unsafe { std::str::from_utf8_unchecked(&buf[body_start + 4..bytes_read]) };
         Ok(parse_peer_summary(body_str))
     } else {
         Ok((0, 0, 0, 0))
     }
 }
 
-fn purge_peer(host: &str) -> io::Result<()> {
-    may::os::unix::net::UnixStream::connect(host)?
-        .write_all(format!("DELETE /purge-payments?from_peer=true HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").as_bytes())
+fn purge_peer(conn: &LazyLock<Mutex<UnixStream>>) -> io::Result<()> {
+    let mut peer_conn = conn.lock().unwrap();
+    peer_conn.write_all(
+        "DELETE /purge-payments?from_peer=true HTTP/1.1\r\nHost: peer\r\nConnection: keep-alive\r\n\r\n"
+            .as_bytes(),
+    )
 }
 
 #[inline(always)]
@@ -486,15 +397,15 @@ impl HttpServiceFactory for Service {
 }
 
 fn main() {
-    may::config().set_pool_capacity(7500).set_stack_size(0x5000);
+    may::config()
+        .set_pool_capacity(2000)
+        .set_stack_size(0x5000);
 
-    let (tx, rx) = mpsc::channel();
+    let (tx, rx) = spsc::channel();
     TX.set(tx).unwrap();
     RX.set(rx).unwrap();
 
-    let default_pool = Conn::new(DEFAULT_HOST);
-    // let fallback_pool = Conn::new(FALLBACK_HOST);
-    may::go!(move || process_worker(default_pool));
+    may::go!(process_worker);
 
     let socket = env::var("SOCKET_PATH").unwrap();
     let socket = std::path::Path::new(&socket);

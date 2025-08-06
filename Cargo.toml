@@ -11,6 +11,7 @@ may_minihttp = { git = "https://github.com/not4rt/may_minihttp", rev = "0b914d4"
 chrono = "0.4"
 dashmap = "6"
 itoa = "1.0"
+ureq = { git = "https://github.com/not4rt/ureq", default-features = false }
 
 [profile.release]
 opt-level = 3
