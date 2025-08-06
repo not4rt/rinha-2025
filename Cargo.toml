@@ -9,7 +9,6 @@ mimalloc = { version = "0.1", default-features = false }
 may = { version = "0.3", default-features = false, features = ["io_timeout"] }
 may_minihttp = { git = "https://github.com/not4rt/may_minihttp", rev = "0b914d4", default-features = false }
 chrono = "0.4"
-parking_lot = "0.12"
 dashmap = "6"
 itoa = "1.0"
 

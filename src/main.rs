@@ -6,6 +6,8 @@ use chrono::{DateTime, FixedOffset, Utc};
 use dashmap::DashMap;
 use may::coroutine::{sleep, yield_now};
 use may::net::TcpStream;
+use may::os::unix::net::UnixStream;
+use may::sync::Mutex;
 use may::sync::mpsc::{self, Receiver, Sender};
 use may_minihttp::{HttpService, HttpServiceFactory, Request, Response};
 use std::env;
@@ -17,6 +19,8 @@ use std::time::Duration;
 
 static STATS: LazyLock<Stats> = LazyLock::new(Stats::new);
 static PEER_SOCKET1: LazyLock<String> = LazyLock::new(|| env::var("PEER1_SOCKET").unwrap());
+static PEER_CONN: LazyLock<Mutex<UnixStream>> =
+    LazyLock::new(|| Mutex::new(UnixStream::connect(PEER_SOCKET1.to_owned()).unwrap()));
 
 static TX: OnceLock<Sender<([u8; 36], [u8; 18])>> = OnceLock::new();
 static RX: OnceLock<Receiver<([u8; 36], [u8; 18])>> = OnceLock::new();
@@ -93,10 +97,10 @@ fn new_connection(host: &str) -> TcpStream {
     unsafe {
         stream.set_nodelay(true).unwrap_unchecked();
         stream
-            .set_read_timeout(Some(Duration::from_millis(500)))
+            .set_read_timeout(Some(Duration::from_millis(250)))
             .unwrap_unchecked();
         stream
-            .set_write_timeout(Some(Duration::from_millis(500)))
+            .set_write_timeout(Some(Duration::from_millis(250)))
             .unwrap_unchecked();
     }
     stream
@@ -178,12 +182,12 @@ fn process_worker(mut default_pool: Conn) {
     let mut req_buf = [0u8; 512];
     let mut resp_buf = [0u8; 256];
     let mut payload_buf = [0u8; 128];
-    let mut discard_buf = [0u8; 2048];
 
     loop {
         let iter = unsafe { RX.get().unwrap_unchecked().iter() };
         for (correlation_id_bytes, amount_bytes) in iter {
             let now = Utc::now();
+            let rfc3339_time = now.to_rfc3339();
             let correlation_id = unsafe { std::str::from_utf8_unchecked(&correlation_id_bytes) };
 
             let amount = unsafe {
@@ -192,8 +196,6 @@ fn process_worker(mut default_pool: Conn) {
                     .unwrap_or(18);
                 std::str::from_utf8_unchecked(&amount_bytes[..len])
             };
-
-            let rfc3339_time = now.to_rfc3339();
 
             let mut payload_writer = BufferWriter::new(&mut payload_buf);
             let _ = write!(
@@ -215,15 +217,6 @@ fn process_worker(mut default_pool: Conn) {
             // let mut attempt = 0;
             let is_fallback = false;
             loop {
-                // let pool = if attempt < 5 {
-                //     &mut default_pool
-                // } else {
-                //     attempt = 0;
-                //     is_fallback = true;
-                //     &mut fallback_pool
-                // };
-                // let conn = &mut pool.conn;
-
                 if unlikely(default_pool.conn.write_all(&req_buf[..tlen]).is_err()) {
                     // println!("Refresh connection - Error on write_all: {e:?}");
                     default_pool.refresh_connection();
@@ -233,33 +226,20 @@ fn process_worker(mut default_pool: Conn) {
                 let mut total_read = 0;
                 let mut headers_end = 0;
 
-                loop {
-                    match default_pool.conn.read(&mut resp_buf[total_read..]) {
-                        Ok(0) => {
-                            // println!("Refresh connection - read returned 0");
-                            default_pool.refresh_connection();
-                            break;
-                        }
-                        Ok(n) => {
-                            total_read += n;
-
-                            if headers_end == 0 {
-                                headers_end =
-                                    find_headers_end(&resp_buf[..total_read]).unwrap_or(0);
-                            }
-
-                            if headers_end > 0 {
-                                break;
-                            }
-                        }
-                        Err(_) => {
-                            // println!("Refresh connection - Error on read: {e:?}");
-                            default_pool.refresh_connection();
-                            break;
-                        }
+                match default_pool.conn.read(&mut resp_buf[total_read..]) {
+                    Ok(0) => {
+                        // println!("Refresh connection - read returned 0");
+                        default_pool.refresh_connection();
                     }
+                    Ok(n) => {
+                        total_read += n;
 
-                    yield_now();
+                        headers_end = find_headers_end(&resp_buf[..total_read]).unwrap_or(0);
+                    }
+                    Err(_) => {
+                        // println!("Refresh connection - Error on read: {e:?}");
+                        default_pool.refresh_connection();
+                    }
                 }
 
                 if headers_end == 0 || total_read < 12 {
@@ -270,21 +250,10 @@ fn process_worker(mut default_pool: Conn) {
                 let status = get_status_code(&resp_buf).unwrap_or(&[0, 0, 0]);
                 match status {
                     b"200" => {
-                        STATS.record(now, parse_amount_cents(amount), is_fallback);
                         break;
                     }
                     b"422" => {
-                        STATS.record(now, parse_amount_cents(amount), is_fallback);
-                        let headers =
-                            unsafe { std::str::from_utf8_unchecked(&resp_buf[..headers_end]) };
-                        consume_response_body(
-                            &mut default_pool.conn,
-                            headers,
-                            headers_end,
-                            total_read,
-                            &resp_buf,
-                            &mut discard_buf,
-                        );
+                        default_pool.refresh_connection();
                         break;
                     }
                     b"500" => {
@@ -302,6 +271,7 @@ fn process_worker(mut default_pool: Conn) {
                 yield_now();
             }
 
+            STATS.record(now, parse_amount_cents(amount), is_fallback);
             yield_now();
         }
         yield_now();
@@ -328,119 +298,11 @@ fn find_headers_end(buffer: &[u8]) -> Option<usize> {
 }
 
 #[inline(always)]
-fn parse_content_length(headers: &str) -> Option<usize> {
-    let cl_pos = headers.find("Content-Length: ")?;
-    let cl_start = cl_pos + 16;
-    let cl_end = headers[cl_start..].find('\r')?;
-    headers[cl_start..cl_start + cl_end].parse().ok()
-}
-
-#[inline(always)]
 fn get_status_code(buffer: &[u8]) -> Option<&[u8; 3]> {
     if buffer.len() >= 12 {
         unsafe { Some(&*(buffer.as_ptr().add(9) as *const [u8; 3])) }
     } else {
         None
-    }
-}
-
-#[inline(always)]
-fn consume_remaining_body(conn: &mut TcpStream, mut remaining: usize, discard_buf: &mut [u8]) {
-    while remaining > 0 {
-        let to_read = remaining.min(discard_buf.len());
-        match conn.read(&mut discard_buf[..to_read]) {
-            Ok(n) if n > 0 => remaining -= n,
-            _ => break,
-        }
-    }
-}
-
-#[inline(always)]
-fn consume_response_body(
-    conn: &mut TcpStream,
-    headers: &str,
-    headers_end: usize,
-    total_read: usize,
-    resp_buf: &[u8],
-    discard_buf: &mut [u8],
-) {
-    if headers.contains("Transfer-Encoding: chunked") {
-        consume_chunked_body(conn, &resp_buf[headers_end..total_read]);
-    } else if let Some(cl) = parse_content_length(headers) {
-        let body_read = total_read - headers_end;
-        if body_read < cl {
-            let remaining = cl - body_read;
-            consume_remaining_body(conn, remaining, discard_buf);
-        }
-    }
-}
-
-#[inline(always)]
-fn consume_chunked_body(conn: &mut TcpStream, initial_data: &[u8]) {
-    let mut buf = [0u8; 1024];
-    let mut remaining_buf = [0u8; 2048];
-    let mut remaining_len = initial_data.len().min(remaining_buf.len());
-    remaining_buf[..remaining_len].copy_from_slice(&initial_data[..remaining_len]);
-
-    loop {
-        let mut chunk_size = 0usize;
-        let mut found_size = false;
-        let mut consumed = 0;
-
-        for i in 1..remaining_len {
-            if remaining_buf[i - 1] == b'\r' && remaining_buf[i] == b'\n' {
-                let size_str = unsafe { std::str::from_utf8_unchecked(&remaining_buf[..i - 1]) };
-                if let Ok(size) = usize::from_str_radix(size_str.trim(), 16) {
-                    chunk_size = size;
-                    found_size = true;
-                    consumed = i + 1;
-                    break;
-                }
-            }
-        }
-
-        if found_size {
-            let new_len = remaining_len - consumed;
-            if new_len > 0 {
-                remaining_buf.copy_within(consumed..remaining_len, 0);
-            }
-            remaining_len = new_len;
-        } else {
-            if remaining_len >= remaining_buf.len() {
-                remaining_len = 0;
-            }
-            match conn.read(&mut buf) {
-                Ok(n) if n > 0 => {
-                    let can_copy = n.min(remaining_buf.len() - remaining_len);
-                    remaining_buf[remaining_len..remaining_len + can_copy]
-                        .copy_from_slice(&buf[..can_copy]);
-                    remaining_len += can_copy;
-                    continue;
-                }
-                _ => return,
-            }
-        }
-
-        if chunk_size == 0 {
-            if remaining_len < 2 {
-                let _ = conn.read(&mut buf[..2 - remaining_len]);
-            }
-            return;
-        }
-
-        let total_needed = chunk_size + 2;
-
-        if remaining_len >= total_needed {
-            let new_len = remaining_len - total_needed;
-            if new_len > 0 {
-                remaining_buf.copy_within(total_needed..remaining_len, 0);
-            }
-            remaining_len = new_len;
-        } else {
-            let to_read = total_needed - remaining_len;
-            consume_remaining_body(conn, to_read, &mut buf);
-            remaining_len = 0;
-        }
     }
 }
 
@@ -470,110 +332,52 @@ impl HttpService for Service {
                     .unwrap_unchecked()
                     .send((body[18..54].try_into().unwrap_unchecked(), amount));
             };
-            return Ok(());
-        }
-
-        if unlikely(path.starts_with("/payments-summary")) {
-            let (from_ms, to_ms, from_peer) = parse_query_params(path);
-            let (dc, da, fc, fa) = STATS.get_summary(from_ms, to_ms);
-
-            let (total_dc, total_da, total_fc, total_fa) = if !from_peer {
-                let (pdc, pda, pfc, pfa) = fetch_peer_summary(&PEER_SOCKET1, path).unwrap();
+        } else if path.starts_with("/payments-summary") {
+            let (pdc, pda, pfc, pfa) = fetch_peer_summary(&PEER_SOCKET1, path).unwrap();
+            let (from_ms, to_ms) = parse_query_params(path);
+            let (total_dc, total_da, total_fc, total_fa) = {
+                let (dc, da, fc, fa) = STATS.get_summary(from_ms, to_ms);
                 (dc + pdc, da + pda, fc + pfc, fa + pfa)
-            } else {
-                (dc, da, fc, fa)
             };
 
             rsp.header("Content-Type: application/json").body_vec(format!(
                     r#"{{"default":{{"totalRequests":{},"totalAmount":{:.2}}},"fallback":{{"totalRequests":{},"totalAmount":{:.2}}}}}"#,
                     total_dc, total_da as f64 / 100.0, total_fc, total_fa as f64 / 100.0
                 ).into_bytes());
-            return Ok(());
-        }
+        } else if path.starts_with("/peer/payments-summary") {
+            let (from_ms, to_ms) = parse_query_params(path);
+            let (total_dc, total_da, total_fc, total_fa) = STATS.get_summary(from_ms, to_ms);
 
-        if unlikely(path == "/purge-payments") {
+            rsp.header("Content-Type: application/json").body_vec(format!(
+                    r#"{{"default":{{"totalRequests":{},"totalAmount":{:.2}}},"fallback":{{"totalRequests":{},"totalAmount":{:.2}}}}}"#,
+                    total_dc, total_da as f64 / 100.0, total_fc, total_fa as f64 / 100.0
+                ).into_bytes());
+        } else if unlikely(path == "/purge-payments") {
             STATS.reset();
             let from_peer = req.path().contains("from_peer=true");
             if !from_peer {
                 let _ = purge_peer(&PEER_SOCKET1);
             }
-            return Ok(());
+        } else {
+            rsp.status_code(404, "Not Found");
         }
-
-        rsp.status_code(404, "Not Found");
         Ok(())
-
-        // match path {
-        //     "/payments" => {
-        //         let mut body_reader = req.body();
-        //         let body = unsafe { body_reader.fill_buf().unwrap_unchecked() };
-        //         let len = (body.len() - 66).min(18); // this will corrupt amount if it is more than 18 bytes long
-
-        //         let amount: [u8; 18] = unsafe { std::mem::zeroed() };
-        //         unsafe {
-        //             std::ptr::copy_nonoverlapping(
-        //                 body.as_ptr().add(65),
-        //                 amount.as_ptr() as *mut u8,
-        //                 len,
-        //             )
-        //         };
-
-        //         unsafe {
-        //             let _ = TX
-        //                 .get()
-        //                 .unwrap_unchecked()
-        //                 .send((body[18..54].try_into().unwrap_unchecked(), amount));
-        //         };
-        //     }
-        //     path if path.starts_with("/payments-summary") => {
-        //         let (from_ms, to_ms, from_peer) = parse_query_params(path);
-        //         let (dc, da, fc, fa) = STATS.get_summary(from_ms, to_ms);
-
-        //         let (total_dc, total_da, total_fc, total_fa) = if !from_peer {
-        //             let (pdc, pda, pfc, pfa) = fetch_peer_summary(&PEER_SOCKET1, path).unwrap();
-        //             (dc + pdc, da + pda, fc + pfc, fa + pfa)
-        //         } else {
-        //             (dc, da, fc, fa)
-        //         };
-
-        //         rsp.header("Content-Type: application/json").body_vec(format!(
-        //             r#"{{"default":{{"totalRequests":{},"totalAmount":{:.2}}},"fallback":{{"totalRequests":{},"totalAmount":{:.2}}}}}"#,
-        //             total_dc, total_da as f64 / 100.0, total_fc, total_fa as f64 / 100.0
-        //         ).into_bytes());
-        //     }
-        //     "/purge-payments" => {
-        //         STATS.reset();
-        //         let from_peer = req.path().contains("from_peer=true");
-        //         if !from_peer {
-        //             let _ = purge_peer(&PEER_SOCKET1);
-        //         }
-        //     }
-        //     _ => {
-        //         rsp.status_code(404, "Not Found");
-        //     }
-        // }
-        // Ok(())
     }
 }
 
 #[inline(always)]
 fn parse_query_params(
     path: &str,
-) -> (
-    Option<DateTime<FixedOffset>>,
-    Option<DateTime<FixedOffset>>,
-    bool,
-) {
+) -> (Option<DateTime<FixedOffset>>, Option<DateTime<FixedOffset>>) {
     let path_bytes = path.as_bytes();
     let query_start = match path_bytes.iter().position(|&b| b == b'?') {
         Some(pos) => pos + 1,
-        None => return (None, None, false),
+        None => return (None, None),
     };
 
     let query_bytes = &path_bytes[query_start..];
     let mut from_ms = None;
     let mut to_ms = None;
-    let mut from_peer = false;
 
     let mut start = 0;
     for (i, &byte) in query_bytes.iter().enumerate() {
@@ -596,7 +400,6 @@ fn parse_query_params(
                             to_ms = chrono::DateTime::parse_from_rfc3339(s).ok();
                         }
                     }
-                    b"from_peer" => from_peer = value == b"true",
                     _ => {}
                 }
             }
@@ -604,7 +407,7 @@ fn parse_query_params(
         }
     }
 
-    (from_ms, to_ms, from_peer)
+    (from_ms, to_ms)
 }
 
 #[inline(always)]
@@ -624,49 +427,18 @@ fn parse_amount_cents(amount_str: &str) -> u64 {
 }
 
 fn fetch_peer_summary(socket: &str, path: &str) -> io::Result<(u64, u64, u64, u64)> {
-    let mut stream = may::os::unix::net::UnixStream::connect(socket)?;
-
-    stream.write_all(
-        format!(
-            "GET {}{}from_peer=true HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-            path,
-            if path.contains('?') { "&" } else { "?" },
-            socket
-        )
-        .as_bytes(),
+    let mut peer_conn = PEER_CONN.lock().unwrap();
+    peer_conn.write_all(
+        format!("GET /peer{path} HTTP/1.1\r\nHost: {socket}\r\nConnection: close\r\n\r\n")
+            .as_bytes(),
     )?;
 
-    let mut response = Vec::with_capacity(1024);
-    let mut buf = [0u8; 1024];
+    let mut buf = [0u8; 256];
 
-    loop {
-        match stream.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                response.extend_from_slice(&buf[..n]);
-                if response.windows(4).any(|w| w == b"\r\n\r\n")
-                    && let Some(body_start) = response.windows(4).position(|w| w == b"\r\n\r\n")
-                {
-                    let headers = unsafe { std::str::from_utf8_unchecked(&response[..body_start]) };
-                    if let Some(cl_pos) = headers.find("Content-Length: ") {
-                        let cl_start = cl_pos + 16;
-                        let cl_end = headers[cl_start..].find('\r').unwrap_or(0);
-                        if let Ok(content_length) =
-                            headers[cl_start..cl_start + cl_end].parse::<usize>()
-                            && response.len() - (body_start + 4) >= content_length
-                        {
-                            break;
-                        }
-                    }
-                }
-            }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-            Err(e) => return Err(e),
-        }
-    }
+    let _ = peer_conn.read(&mut buf).unwrap();
 
-    if let Some(body_start) = response.windows(4).position(|w| w == b"\r\n\r\n") {
-        let body_str = unsafe { std::str::from_utf8_unchecked(&response[body_start + 4..]) };
+    if let Some(body_start) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+        let body_str = unsafe { std::str::from_utf8_unchecked(&buf[body_start + 4..]) };
         Ok(parse_peer_summary(body_str))
     } else {
         Ok((0, 0, 0, 0))

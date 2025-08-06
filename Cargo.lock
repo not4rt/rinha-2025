@@ -436,7 +436,6 @@ dependencies = [
  "may",
  "may_minihttp",
  "mimalloc",
- "parking_lot",
 ]
 
 [[package]]
