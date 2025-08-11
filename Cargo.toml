@@ -6,19 +6,4 @@ edition = "2024"
 [dependencies]
 mimalloc = { version = "0.1", default-features = false }
 
-may = { version = "0.3", default-features = false, features = ["io_timeout"] }
-
-[profile.release]
-opt-level = 3
-codegen-units = 1
-panic = 'abort'
-lto = 'fat'
-debug = false
-incremental = false
-
-[profile.release.build-override]
-opt-level = 3
-
-[profile.release.package."*"]
-opt-level = 3
-codegen-units = 1
+tokio-uring = { git = "https://github.com/decathorpe/tokio-uring", rev = "025682b"}
