@@ -7,6 +7,7 @@ services:
         maxconn 20000
       defaults
         mode http
+        option http-keep-alive
       frontend api_frontend
         bind *:80
         default_backend api_backend
@@ -37,6 +38,8 @@ services:
       PEER1_SOCKET: /sockets/may.sock.2
       PEER2_SOCKET: /sockets/may.sock.3
       SOCKET_PATH: /sockets/may.sock.1
+    security_opt: 
+          - seccomp=unconfined  # io_ring support
     volumes:
       - sockets:/sockets:rw
     networks:
@@ -58,6 +61,8 @@ services:
       SOCKET_PATH: /sockets/may.sock.2
     volumes:
       - sockets:/sockets:rw
+    security_opt: 
+          - seccomp=unconfined  # io_ring support
     networks:
       - backend
       - payment-processor
