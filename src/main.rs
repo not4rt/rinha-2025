@@ -16,13 +16,8 @@ use tokio::{
 };
 use tokio_uring::net::{UnixListener, UnixStream};
 
-// const SUMMARY_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 94\r\nConnection: keep-alive\r\n\r\n{\"default\":{\"totalAmount\":0,\"totalRequests\":0},\"fallback\":{\"totalAmount\":0,\"totalRequests\":0}}";
 const OK_RESPONSE: &[u8] =
     b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n";
-// const GET_LENGTH: usize = 176;
-// const POST1_LENGTH: usize = 200;
-// const POST2_LENGTH: usize = 201;
-// const PURGE_LENGTH: usize = 136;
 
 static STATS: LazyLock<Stats> = LazyLock::new(Stats::new);
 static PEER_SOCKET1: LazyLock<String> = LazyLock::new(|| env::var("PEER1_SOCKET").unwrap());
@@ -31,7 +26,6 @@ static TX: OnceLock<Sender<([u8; 36], [u8; 18])>> = OnceLock::new();
 
 const DEFAULT_URL: &str = "http://payment-processor-default:8080/payments";
 
-#[repr(C)]
 struct Stats {
     records: DashMap<DateTime<Utc>, u64>,
 }
@@ -55,6 +49,7 @@ impl Stats {
         }
     }
 
+    #[inline]
     fn get_summary(
         &self,
         from_ms: Option<DateTime<FixedOffset>>,
@@ -84,6 +79,7 @@ impl Stats {
         (dc, da, fc, fa)
     }
 
+    #[inline]
     fn reset(&self) {
         self.records.clear();
     }
@@ -144,10 +140,6 @@ async fn process_worker(mut rx: Receiver<([u8; 36], [u8; 18])>) {
                         tokio::time::sleep(Duration::from_millis(5000)).await;
                     }
                     _ => {
-                        // println!(
-                        //     "Refresh connection - Unknown status code: {}",
-                        //     String::from_utf8_lossy(status)
-                        // );
                         cold_path();
                         unreachable!();
                     }
@@ -209,17 +201,12 @@ async fn handle_stream(stream: &mut UnixStream) {
             (Ok(0), _) => {
                 // keep-alive close
                 // cold_path();
-                // println!(
-                //     "Ok count: {byte_count} response: {}- Closing connection",
-                //     String::from_utf8_lossy(&response)
-                // );
                 break;
             }
             (Ok(_), buffer) if buffer[0] == b'G' => {
                 // GET Summary
                 cold_path();
 
-                // println!("Ok GET_LENGTH");
                 let (from, to) = if buffer[21] == b'?' {
                     let from_ms: [u8; 24] = buffer[27..51].try_into().unwrap();
                     let to_ms: [u8; 24] = buffer[55..79].try_into().unwrap();
@@ -234,10 +221,8 @@ async fn handle_stream(stream: &mut UnixStream) {
                     (None, None)
                 };
 
-                // println!("from_ms: {from} - to_ms: {to}");
                 let (dc, da, fc, fa) = if buffer[1] == b'p' {
                     //from peer
-                    println!("summary request from peer");
                     let (dc, da, fc, fa) = STATS.get_summary(from, to);
 
                     let mut peer_rsp = [0u8; 32];
@@ -249,7 +234,6 @@ async fn handle_stream(stream: &mut UnixStream) {
                     break;
                 } else {
                     // not from peer
-                    println!("summary request NOT from peer");
                     let peer_conn: UnixStream =
                         UnixStream::connect(PEER_SOCKET1.as_str()).await.unwrap();
                     let mut peer_req: [u8; 87] = buffer[..87].try_into().unwrap();
@@ -274,8 +258,6 @@ async fn handle_stream(stream: &mut UnixStream) {
                     body.len()
                 );
 
-                // println!("summary request: {}", String::from_utf8_lossy(&buffer));
-                // println!("summary response: {response}");
                 stream.write(response.as_bytes().to_owned()).submit().await; // this did not returned any error on local tests, but will probably return error on official test
             }
             (Ok(_), buffer) if buffer[7] == b'u' => {
@@ -289,7 +271,6 @@ async fn handle_stream(stream: &mut UnixStream) {
                 }
                 stream.write(OK_RESPONSE).submit().await;
                 STATS.reset();
-                println!("Purge!");
             }
             (Ok(_), _) => {
                 cold_path();
@@ -298,9 +279,6 @@ async fn handle_stream(stream: &mut UnixStream) {
             (Err(_), _) => {
                 cold_path();
                 unreachable!();
-                // Err
-                // println!("Error! {e:?}");
-                // break;
             }
         };
     }

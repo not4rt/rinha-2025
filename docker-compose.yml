@@ -36,7 +36,6 @@ services:
     build: .
     environment:
       PEER1_SOCKET: /sockets/may.sock.2
-      PEER2_SOCKET: /sockets/may.sock.3
       SOCKET_PATH: /sockets/may.sock.1
     security_opt: 
           - seccomp=unconfined  # io_ring support
@@ -50,14 +49,13 @@ services:
     deploy:
       resources:
         limits:
-          memory: 100M
+          memory: 40M
           cpus: "0.6"
 
   backend2:
     build: .
     environment:
       PEER1_SOCKET: /sockets/may.sock.1
-      PEER2_SOCKET: /sockets/may.sock.3
       SOCKET_PATH: /sockets/may.sock.2
     volumes:
       - sockets:/sockets:rw
@@ -71,7 +69,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 100M
+          memory: 40M
           cpus: "0.6"
 
 volumes:
