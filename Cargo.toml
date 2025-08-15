@@ -4,13 +4,14 @@ version = "3.1.0"
 edition = "2024"
 
 [dependencies]
+chrono = "0.4.41"
+dashmap = { version = "6.1.0", features = ["inline"] }
 mimalloc = { version = "0.1", default-features = false }
+reqwest = { version = "0.12.23", default-features = false }
+tokio = { version = "1.47.1", default-features = false }
 
-may = { version = "0.3", default-features = false, features = ["io_timeout"] }
-may_minihttp = { git = "https://github.com/not4rt/may_minihttp", rev = "0b914d4", default-features = false }
-chrono = "0.4"
-parking_lot = "0.12"
-dashmap = "6"
+tokio-uring = { git = "https://github.com/not4rt/tokio-uring", rev = "eb08a96" }
+
 
 [profile.release]
 opt-level = 3

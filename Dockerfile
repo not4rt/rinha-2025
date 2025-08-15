@@ -1,15 +1,19 @@
 FROM rust:latest AS builder
 WORKDIR /app
 
-RUN apt-get update -yqq && apt-get install -yqq cmake g++
+# Build dependencies
+COPY Cargo.toml Cargo.lock ./
+RUN mkdir src && echo "fn main() {}" > src/main.rs
+RUN RUSTFLAGS="-C target-cpu=skylake -C link-arg=-fuse-ld=lld -Z share-generics=y" cargo +nightly build --release
+RUN rm -rf src
 
-COPY ./ ./
-RUN cargo clean
+# Build application
+COPY src ./src
+RUN touch src/main.rs
 RUN RUSTFLAGS="-C target-cpu=skylake -C link-arg=-fuse-ld=lld -Z share-generics=y" cargo +nightly build --release
 
 FROM gcr.io/distroless/cc-debian12
 WORKDIR /app
-COPY --from=builder /app/target/release/rust_coroutines_rinha_2025 .
-
+COPY --from=builder /app/target/release/rust_coroutines_rinha_2025 /app/
 EXPOSE 8080
-ENTRYPOINT [ "./rust_coroutines_rinha_2025" ]
+CMD ["./rust_coroutines_rinha_2025"]

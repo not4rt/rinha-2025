@@ -13,10 +13,8 @@ services:
         default_backend api_backend
       backend api_backend
         balance roundrobin
-        option http-keep-alive
-        server backend1 /sockets/may.sock.1 check
-        server backend2 /sockets/may.sock.2 check
-        server backend3 /sockets/may.sock.3 check' > /tmp/haproxy.cfg &&
+        server backend1 /sockets/may.sock.1
+        server backend2 /sockets/may.sock.2' > /tmp/haproxy.cfg &&
       haproxy -f /tmp/haproxy.cfg"
     user: "0"
     ports:
@@ -24,16 +22,15 @@ services:
     depends_on:
       - backend1
       - backend2
-      - backend3
     networks:
       - backend
     volumes:
       - sockets:/sockets:rw
-    deploy:
-      resources:
-        limits:
-          memory: 50M
-          cpus: "0.3"
+    # deploy:
+    #   resources:
+    #     limits:
+    #       memory: 50M
+    #       cpus: "0.3"
 
   backend1:
     build: .
@@ -41,16 +38,20 @@ services:
       PEER1_SOCKET: /sockets/may.sock.2
       PEER2_SOCKET: /sockets/may.sock.3
       SOCKET_PATH: /sockets/may.sock.1
+    security_opt: 
+          - seccomp=unconfined  # io_ring support
     volumes:
       - sockets:/sockets:rw
     networks:
       - backend
       - payment-processor
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     deploy:
       resources:
         limits:
           memory: 100M
-          cpus: "0.4"
+          cpus: "0.6"
 
   backend2:
     build: .
@@ -60,31 +61,18 @@ services:
       SOCKET_PATH: /sockets/may.sock.2
     volumes:
       - sockets:/sockets:rw
+    security_opt: 
+          - seccomp=unconfined  # io_ring support
     networks:
       - backend
       - payment-processor
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     deploy:
       resources:
         limits:
           memory: 100M
-          cpus: "0.4"
-
-  backend3:
-    build: .
-    environment:
-      PEER1_SOCKET: /sockets/may.sock.1
-      PEER2_SOCKET: /sockets/may.sock.2
-      SOCKET_PATH: /sockets/may.sock.3
-    volumes:
-      - sockets:/sockets:rw
-    networks:
-      - backend
-      - payment-processor
-    deploy:
-      resources:
-        limits:
-          memory: 100M
-          cpus: "0.4"
+          cpus: "0.6"
 
 volumes:
   sockets:

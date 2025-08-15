@@ -1,47 +1,56 @@
-#![feature(likely_unlikely)]
+#![feature(cold_path)]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use chrono::{DateTime, FixedOffset, Utc};
 use dashmap::DashMap;
-use may::coroutine::{sleep, yield_now};
-use may::net::TcpStream;
-use may::sync::mpmc::{self, Receiver, Sender};
-use may_minihttp::{HttpService, HttpServiceFactory, Request, Response};
-use std::env;
-use std::hint::{likely, unlikely};
-use std::io::{self, BufRead, Read, Write};
-use std::sync::{LazyLock, OnceLock};
-use std::time::Duration;
+use std::{
+    env, fs,
+    hint::cold_path,
+    sync::{LazyLock, OnceLock},
+    time::Duration,
+};
+use tokio::{
+    sync::mpsc::{Receiver, Sender},
+    task::yield_now,
+};
+use tokio_uring::net::{UnixListener, UnixStream};
+
+// const SUMMARY_RESPONSE: &[u8] = b"HTTP/1.1 200 OK\r\nContent-Length: 94\r\nConnection: keep-alive\r\n\r\n{\"default\":{\"totalAmount\":0,\"totalRequests\":0},\"fallback\":{\"totalAmount\":0,\"totalRequests\":0}}";
+const OK_RESPONSE: &[u8] =
+    b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n";
+// const GET_LENGTH: usize = 176;
+// const POST1_LENGTH: usize = 200;
+// const POST2_LENGTH: usize = 201;
+// const PURGE_LENGTH: usize = 136;
 
 static STATS: LazyLock<Stats> = LazyLock::new(Stats::new);
 static PEER_SOCKET1: LazyLock<String> = LazyLock::new(|| env::var("PEER1_SOCKET").unwrap());
-static PEER_SOCKET2: LazyLock<String> = LazyLock::new(|| env::var("PEER2_SOCKET").unwrap());
 
-static TX: OnceLock<Sender<([u8; 36], [u8; 16])>> = OnceLock::new();
-static RX: OnceLock<Receiver<([u8; 36], [u8; 16])>> = OnceLock::new();
+static TX: OnceLock<Sender<([u8; 36], [u8; 18])>> = OnceLock::new();
 
-const DEFAULT_HOST: &str = "payment-processor-default:8080";
+const DEFAULT_URL: &str = "http://payment-processor-default:8080/payments";
 
+#[repr(C)]
 struct Stats {
-    records: DashMap<DateTime<Utc>, (u64, bool)>,
+    records: DashMap<DateTime<Utc>, u64>,
 }
 
 impl Stats {
     fn new() -> Self {
         Self {
-            records: DashMap::with_capacity(10000),
+            records: DashMap::with_capacity(50_000),
         }
     }
 
     #[inline(always)]
-    fn record(&self, timestamp: DateTime<Utc>, amount_cents: u64, is_fallback: bool) {
+    fn record(&self, timestamp: DateTime<Utc>, amount_cents: u64) {
         match self.records.get_mut(&timestamp) {
             Some(mut entry) => {
-                *entry = (entry.value_mut().0 + amount_cents, is_fallback);
+                *entry += amount_cents;
             }
             None => {
-                self.records.insert(timestamp, (amount_cents, is_fallback));
+                self.records.insert(timestamp, amount_cents);
             }
         }
     }
@@ -53,8 +62,8 @@ impl Stats {
     ) -> (u64, u64, u64, u64) {
         let mut dc = 0u64;
         let mut da = 0u64;
-        let mut fc = 0u64;
-        let mut fa = 0u64;
+        let fc = 0u64;
+        let fa = 0u64;
 
         for record in self.records.iter() {
             if let Some(from) = from_ms
@@ -68,13 +77,8 @@ impl Stats {
                 continue;
             }
 
-            if record.1 {
-                fc += 1;
-                fa += record.0;
-            } else {
-                dc += 1;
-                da += record.0;
-            }
+            dc += 1;
+            da += *record;
         }
 
         (dc, da, fc, fa)
@@ -85,286 +89,72 @@ impl Stats {
     }
 }
 
-#[inline(always)]
-fn new_connection(host: &str) -> TcpStream {
-    let stream = unsafe { TcpStream::connect(host).unwrap_unchecked() };
-    unsafe {
-        stream.set_nodelay(true).unwrap_unchecked();
-        stream
-            .set_read_timeout(Some(Duration::from_millis(1000)))
-            .unwrap_unchecked();
-        stream
-            .set_write_timeout(Some(Duration::from_millis(1000)))
-            .unwrap_unchecked();
-    }
-    // println!("Created new connection to {}", host);
-    stream
-}
-
-struct Conn {
-    conn: TcpStream,
-    host: &'static str,
-}
-
-impl Conn {
-    fn new(host: &'static str) -> Self {
-        let conn = new_connection(host);
-        Self { conn, host }
-    }
-
-    #[inline(always)]
-    fn refresh_connection(&mut self) {
-        let conn = new_connection(self.host);
-        self.conn = conn;
-    }
-}
-
 #[inline]
-fn process_worker(mut default_pool: Conn) {
-    let mut req_buf = [0u8; 512];
-    let mut resp_buf = [0u8; 203]; // the response is usually 203 bytes long, except on status code 422 and some other edge cases
+async fn process_worker(mut rx: Receiver<([u8; 36], [u8; 18])>) {
+    let http_client = reqwest::ClientBuilder::new()
+        .timeout(Duration::from_millis(500))
+        .tcp_keepalive(Duration::from_secs(60))
+        .http1_only()
+        .build()
+        .unwrap();
 
     loop {
-        let iter = unsafe { RX.get().unwrap_unchecked().iter() };
-        for (correlation_id_bytes, amount_bytes) in iter {
+        let recv = rx.recv().await;
+        if let Some((correlation_id_bytes, amount_bytes)) = recv {
             let now = Utc::now();
             let correlation_id = unsafe { std::str::from_utf8_unchecked(&correlation_id_bytes) };
 
             let amount = unsafe {
                 let len = (0..amount_bytes.len())
                     .find(|&i| amount_bytes[i] == 0)
-                    .unwrap_unchecked();
+                    .unwrap_or(18);
                 std::str::from_utf8_unchecked(&amount_bytes[..len])
             };
 
-            let payload_string = [
-                r#"{"correlationId":""#,
-                correlation_id,
-                r#"","amount":""#,
-                amount,
-                r#"","requestedAt":""#,
-                &now.to_rfc3339(),
-                r#""}"#,
-            ]
-            .concat();
-            let payload = payload_string.as_bytes();
+            let rfc3339_time = now.to_rfc3339();
 
-            let header = format!(
-                "POST /payments HTTP/1.1\r\nHost: payment-processor\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n",
-                payload.len()
+            let payload = format!(
+                r#"{{"correlationId":"{correlation_id}","amount":"{amount}","requestedAt":"{rfc3339_time}"}}"#
             );
-
-            let hlen = header.len();
-            let tlen = hlen + payload.len();
-            req_buf[..hlen].copy_from_slice(header.as_bytes());
-            req_buf[hlen..tlen].copy_from_slice(payload);
-
-            let is_fallback = false;
             loop {
-                if likely(default_pool.conn.write_all(&req_buf[..tlen]).is_ok())
-                    && let Ok(n) = default_pool.conn.read(&mut resp_buf)
-                    && n >= 12
-                {
-                    match &resp_buf[9..12] {
-                        b"200" => {
-                            break;
-                        }
-                        b"422" => {
-                            // println!(
-                            //     "Received 422 Unprocessable Entity for correlationId {}",
-                            //     String::from_utf8_lossy(&correlation_id_bytes)
-                            // );
-                            // 422 means it was processed in the previously request, so probably not a fallback
-                            default_pool.refresh_connection(); // refresh the connection, because there is a big error message on 422
-                            break;
-                        }
-                        b"500" => {
-                            // println!(
-                            //     "Received 500 Internal Server Error for correlationId {}",
-                            //     String::from_utf8_lossy(&correlation_id_bytes)
-                            // );
-                            sleep(Duration::from_millis(1251)); // server is unhealthy
-                        }
-                        status => {
-                            println!(
-                                "Received bad status code {} for correlationId {}",
-                                String::from_utf8_lossy(status),
-                                correlation_id
-                            );
-                            default_pool.refresh_connection(); // refresh the connection, because it might have an error message
-                        }
-                    }
-                } else {
-                    // println!(
-                    //     "Connection failed for correlationId {}",
-                    //     String::from_utf8_lossy(&correlation_id_bytes)
-                    // );
-                    default_pool.refresh_connection(); // refresh the connection, because it might have data left in the buffer
+                yield_now().await;
+                let rsp = http_client
+                    .post(DEFAULT_URL)
+                    .body(payload.clone())
+                    .header(reqwest::header::CONTENT_TYPE, "application/json")
+                    .send()
+                    .await;
+                if rsp.is_err() {
+                    continue;
                 }
 
-                yield_now();
-            }
-
-            STATS.record(now, parse_amount_cents(amount), is_fallback);
-            yield_now();
-        }
-        yield_now();
-    }
-}
-
-struct Service;
-
-impl HttpService for Service {
-    #[inline(always)]
-    fn call<S: Read>(&mut self, req: Request<S>, rsp: &mut Response) -> io::Result<()> {
-        let path = req.path();
-        if likely(path == "/payments") {
-            let mut body_reader = req.body();
-            let body = unsafe { body_reader.fill_buf().unwrap_unchecked() };
-            let len = (body.len() - 66).min(18); // this will corrupt amount if it is more than 18 bytes long
-
-            let amount: [u8; 16] = unsafe { std::mem::zeroed() };
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    body.as_ptr().add(65),
-                    amount.as_ptr() as *mut u8,
-                    len,
-                )
-            };
-
-            unsafe {
-                let _ = TX
-                    .get()
-                    .unwrap_unchecked()
-                    .send((body[18..54].try_into().unwrap_unchecked(), amount));
-            };
-            return Ok(());
-        }
-
-        if unlikely(path.starts_with("/payments-summary")) {
-            let (from_ms, to_ms, from_peer) = parse_query_params(path);
-            let (dc, da, fc, fa) = STATS.get_summary(from_ms, to_ms);
-
-            let (total_dc, total_da, total_fc, total_fa) = if !from_peer {
-                let (pdc, pda, pfc, pfa) = fetch_peer_summary(&PEER_SOCKET1, path).unwrap();
-                let (pdc2, pda2, pfc2, pfa2) = fetch_peer_summary(&PEER_SOCKET2, path).unwrap();
-                (dc + pdc + pdc2, da + pda + pda2, fc + pfc + pfc2, fa + pfa + pfa2)
-            } else {
-                (dc, da, fc, fa)
-            };
-
-            rsp.header("Content-Type: application/json").body_vec(format!(
-                    r#"{{"default":{{"totalRequests":{},"totalAmount":{:.2}}},"fallback":{{"totalRequests":{},"totalAmount":{:.2}}}}}"#,
-                    total_dc, total_da as f64 / 100.0, total_fc, total_fa as f64 / 100.0
-                ).into_bytes());
-            return Ok(());
-        }
-
-        if unlikely(path == "/purge-payments") {
-            STATS.reset();
-            let from_peer = req.path().contains("from_peer=true");
-            if !from_peer {
-                let _ = purge_peer(&PEER_SOCKET1);
-                let _ = purge_peer(&PEER_SOCKET2);
-            }
-            return Ok(());
-        }
-
-        rsp.status_code(404, "Not Found");
-        Ok(())
-        
-        // match path {
-        //     "/payments" => {
-        //         let mut body_reader = req.body();
-        //         let body = unsafe { body_reader.fill_buf().unwrap_unchecked() };
-        //         let len = (body.len() - 66).min(32);
-
-        //         let amount: [u8; 16] = unsafe { std::mem::zeroed() };
-        //         unsafe {
-        //             std::ptr::copy_nonoverlapping(
-        //                 body.as_ptr().add(65),
-        //                 amount.as_ptr() as *mut u8,
-        //                 len,
-        //             )
-        //         };
-        //         let correlation_id: [u8; 36] =
-        //             unsafe { body[18..54].try_into().unwrap_unchecked() };
-
-        //         unsafe {
-        //             let _ = TX.get().unwrap_unchecked().send((correlation_id, amount));
-        //         };
-        //     }
-        //     path if path.starts_with("/payments-summary") => {
-        //         cold_path();
-        //         let (from_ms, to_ms, from_peer) = parse_query_params(path);
-        //         let (dc, da, fc, fa) = STATS.get_summary(from_ms, to_ms);
-
-        //         let (total_dc, total_da, total_fc, total_fa) = if !from_peer {
-        //             let (pdc, pda, pfc, pfa) = fetch_peer_summary(&PEER_SOCKET1, path).unwrap();
-        //             let (pdc2, pda2, pfc2, pfa2) = fetch_peer_summary(&PEER_SOCKET2, path).unwrap();
-        //             (
-        //                 dc + pdc + pdc2,
-        //                 da + pda + pda2,
-        //                 fc + pfc + pfc2,
-        //                 fa + pfa + pfa2,
-        //             )
-        //         } else {
-        //             (dc, da, fc, fa)
-        //         };
-
-        //         rsp.header("Content-Type: application/json").body_vec(format!(
-        //             r#"{{"default":{{"totalRequests":{},"totalAmount":{:.2}}},"fallback":{{"totalRequests":{},"totalAmount":{:.2}}}}}"#,
-        //             total_dc, total_da as f64 / 100.0, total_fc, total_fa as f64 / 100.0
-        //         ).into_bytes());
-        //     }
-        //     "/purge-payments" => {
-        //         cold_path();
-        //         STATS.reset();
-        //         let from_peer = req.path().contains("from_peer=true");
-        //         if !from_peer {
-        //             let _ = purge_peer(&PEER_SOCKET1);
-        //             let _ = purge_peer(&PEER_SOCKET2);
-        //         }
-        //     }
-        //     _ => {
-        //         rsp.status_code(404, "Not Found");
-        //     }
-        // }
-        // Ok(())
-    }
-}
-
-fn parse_query_params(
-    path: &str,
-) -> (
-    Option<DateTime<FixedOffset>>,
-    Option<DateTime<FixedOffset>>,
-    bool,
-) {
-    let query_start = match path.find('?') {
-        Some(pos) => pos + 1,
-        None => return (None, None, false),
-    };
-
-    let query = &path[query_start..];
-    let mut from_ms = None;
-    let mut to_ms = None;
-    let mut from_peer = false;
-
-    for param in query.split('&') {
-        if let Some(eq_pos) = param.find('=') {
-            let (key, value) = param.split_at(eq_pos);
-            let value = &value[1..];
-            match key {
-                "from" => from_ms = chrono::DateTime::parse_from_rfc3339(value).ok(),
-                "to" => to_ms = chrono::DateTime::parse_from_rfc3339(value).ok(),
-                "from_peer" => from_peer = value == "true",
-                _ => {}
+                match rsp.unwrap().status().as_u16() {
+                    200 => {
+                        STATS.record(now, parse_amount_cents(amount));
+                        // println!("Processed payment!");
+                        break;
+                    }
+                    422 => {
+                        STATS.record(now, parse_amount_cents(amount));
+                        // println!("Processed payment!");
+                        break;
+                    }
+                    500 => {
+                        println!("Processor out!");
+                        tokio::time::sleep(Duration::from_millis(5000)).await;
+                    }
+                    _ => {
+                        // println!(
+                        //     "Refresh connection - Unknown status code: {}",
+                        //     String::from_utf8_lossy(status)
+                        // );
+                        cold_path();
+                        unreachable!();
+                    }
+                }
             }
         }
     }
-
-    (from_ms, to_ms, from_peer)
 }
 
 #[inline(always)]
@@ -383,112 +173,151 @@ fn parse_amount_cents(amount_str: &str) -> u64 {
     }
 }
 
-fn fetch_peer_summary(socket: &str, path: &str) -> io::Result<(u64, u64, u64, u64)> {
-    let mut stream = may::os::unix::net::UnixStream::connect(socket)?;
-
-    stream.write_all(
-        format!(
-            "GET {}{}from_peer=true HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
-            path,
-            if path.contains('?') { "&" } else { "?" },
-            socket
-        )
-        .as_bytes(),
-    )?;
-
-    let mut response = Vec::with_capacity(1024);
-    let mut buf = [0u8; 1024];
-
+#[inline(always)]
+async fn handle_stream(stream: &mut UnixStream) {
     loop {
-        match stream.read(&mut buf) {
-            Ok(0) => break,
-            Ok(n) => {
-                response.extend_from_slice(&buf[..n]);
-                if response.windows(4).any(|w| w == b"\r\n\r\n")
-                    && let Some(body_start) = response.windows(4).position(|w| w == b"\r\n\r\n")
-                {
-                    let headers = unsafe { std::str::from_utf8_unchecked(&response[..body_start]) };
-                    if let Some(cl_pos) = headers.find("Content-Length: ") {
-                        let cl_start = cl_pos + 16;
-                        let cl_end = headers[cl_start..].find('\r').unwrap_or(0);
-                        if let Ok(content_length) =
-                            headers[cl_start..cl_start + cl_end].parse::<usize>()
-                            && response.len() - (body_start + 4) >= content_length
-                        {
-                            break;
-                        }
-                    }
-                }
+        // loop to handle keep-alive
+        match stream.read(vec![0u8; 206]).await {
+            (Ok(length), buffer) if buffer[7] == b'a' => {
+                // POST payment
+                stream.write(OK_RESPONSE).submit().await; // this did not returned any error on local tests, but probably will return error on official test
+
+                let len = length - 131;
+                let body: [u8; 100] = unsafe { std::mem::zeroed() };
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        buffer.as_ptr().add(131),
+                        body.as_ptr() as *mut u8,
+                        len,
+                    )
+                };
+
+                let correlation_id: [u8; 36] = body[18..54].try_into().unwrap();
+
+                let amount: [u8; 18] = unsafe { std::mem::zeroed() };
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        buffer.as_ptr().add(196),
+                        amount.as_ptr() as *mut u8,
+                        len - 66,
+                    )
+                };
+
+                TX.get().unwrap().send((correlation_id, amount)).await;
             }
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-            Err(e) => return Err(e),
-        }
+            (Ok(0), _) => {
+                // keep-alive close
+                // cold_path();
+                // println!(
+                //     "Ok count: {byte_count} response: {}- Closing connection",
+                //     String::from_utf8_lossy(&response)
+                // );
+                break;
+            }
+            (Ok(_), buffer) if buffer[0] == b'G' => {
+                // GET Summary
+                cold_path();
+
+                // println!("Ok GET_LENGTH");
+                let from_ms: [u8; 24] = buffer[27..51].try_into().unwrap();
+                let to_ms: [u8; 24] = buffer[55..79].try_into().unwrap();
+
+                let from = chrono::DateTime::parse_from_rfc3339(str::from_utf8(&from_ms).unwrap())
+                    .unwrap();
+                let to =
+                    chrono::DateTime::parse_from_rfc3339(str::from_utf8(&to_ms).unwrap()).unwrap();
+
+                // println!("from_ms: {from} - to_ms: {to}");
+                let (dc, da, fc, fa) = if buffer[1] == b'p' {
+                    //from peer
+                    println!("summary request from peer");
+                    let (dc, da, fc, fa) = STATS.get_summary(Some(from), Some(to));
+
+                    let mut peer_rsp = [0u8; 32];
+                    peer_rsp[0..8].copy_from_slice(&dc.to_le_bytes());
+                    peer_rsp[8..16].copy_from_slice(&da.to_le_bytes());
+                    peer_rsp[16..24].copy_from_slice(&fc.to_le_bytes());
+                    peer_rsp[24..32].copy_from_slice(&fa.to_le_bytes());
+                    stream.write(peer_rsp[..].to_owned()).submit().await;
+                    break;
+                } else {
+                    // not from peer
+                    println!("summary request NOT from peer");
+                    let peer_conn: UnixStream =
+                        UnixStream::connect(PEER_SOCKET1.as_str()).await.unwrap();
+                    let mut peer_req: [u8; 87] = buffer[..87].try_into().unwrap();
+                    peer_req[1] = b'p'; // workaround kk
+                    peer_conn.write(peer_req[..].to_owned()).submit().await;
+                    let (_, buf) = peer_conn.read(vec![0u8; 32]).await;
+
+                    let peer_dc = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+                    let peer_da = u64::from_le_bytes(buf[8..16].try_into().unwrap());
+                    let peer_fc = u64::from_le_bytes(buf[16..24].try_into().unwrap());
+                    let peer_fa = u64::from_le_bytes(buf[24..32].try_into().unwrap());
+
+                    let (dc, da, fc, fa) = STATS.get_summary(Some(from), Some(to));
+                    (dc + peer_dc, da + peer_da, fc + peer_fc, fa + peer_fa)
+                };
+                let body = format!(
+                    "{{\"default\":{{\"totalAmount\":{},\"totalRequests\":{dc}}},\"fallback\":{{\"totalAmount\":{fa},\"totalRequests\":{fc}}}}}",
+                    da as f64 / 100.0
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{body}",
+                    body.len()
+                );
+
+                // println!("summary request: {}", String::from_utf8_lossy(&buffer));
+                // println!("summary response: {response}");
+                stream.write(response.as_bytes().to_owned()).submit().await; // this did not returned any error on local tests, but will probably return error on official test
+            }
+            (Ok(_), buffer) if buffer[7] == b'u' => {
+                // POST /purge
+                if buffer[1] != b'p' {
+                    let peer_conn: UnixStream =
+                        UnixStream::connect(PEER_SOCKET1.as_str()).await.unwrap();
+                    let mut peer_req: [u8; 87] = buffer[..87].try_into().unwrap();
+                    peer_req[1] = b'p'; // workaround kk
+                    peer_conn.write(peer_req[..].to_owned()).submit().await;
+                }
+                stream.write(OK_RESPONSE).submit().await;
+                STATS.reset();
+                println!("Purge!");
+            }
+            (Ok(_), _) => {
+                cold_path();
+                unreachable!();
+            }
+            (Err(_), _) => {
+                cold_path();
+                unreachable!();
+                // Err
+                // println!("Error! {e:?}");
+                // break;
+            }
+        };
+        yield_now().await
     }
-
-    if let Some(body_start) = response.windows(4).position(|w| w == b"\r\n\r\n") {
-        let body_str = unsafe { std::str::from_utf8_unchecked(&response[body_start + 4..]) };
-
-        let dc = extract_json_u64(body_str, "\"default\":{\"totalRequests\":").unwrap_or(0);
-        let da = parse_amount_cents(extract_json_str(body_str, "\"totalAmount\":").unwrap_or("0"));
-
-        let fallback_pos = body_str.find("\"fallback\":").unwrap_or(0);
-        let fc = extract_json_u64(
-            &body_str[fallback_pos..],
-            "\"fallback\":{\"totalRequests\":",
-        )
-        .unwrap_or(0);
-        let fa_pos = body_str[fallback_pos..]
-            .find("\"totalAmount\":")
-            .unwrap_or(0)
-            + fallback_pos;
-        let fa = parse_amount_cents(
-            extract_json_str(&body_str[fa_pos..], "\"totalAmount\":").unwrap_or("0"),
-        );
-
-        Ok((dc, da, fc, fa))
-    } else {
-        Ok((0, 0, 0, 0))
-    }
-}
-
-fn purge_peer(host: &str) -> io::Result<()> {
-    may::os::unix::net::UnixStream::connect(host)?
-        .write_all(format!("DELETE /purge-payments?from_peer=true HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n").as_bytes())
 }
 
 #[inline]
-fn extract_json_u64(json: &str, key: &str) -> Option<u64> {
-    let start = json.find(key)? + key.len();
-    let end = json[start..].find([',', '}'])?;
-    json[start..start + end].parse().ok()
-}
-
-#[inline]
-fn extract_json_str<'a>(json: &'a str, key: &str) -> Option<&'a str> {
-    let start = json.find(key)? + key.len();
-    let end = json[start..].find([',', '}'])?;
-    Some(&json[start..start + end])
-}
-
-impl HttpServiceFactory for Service {
-    type Service = Self;
-    #[inline(always)]
-    fn new_service(&self, _: usize) -> Self {
-        Self
-    }
-}
-
 fn main() {
-    may::config().set_pool_capacity(5000).set_stack_size(0x5000);
-
-    let (tx, rx) = mpmc::channel();
-    TX.set(tx).unwrap();
-    RX.set(rx).unwrap();
-
-    let default_pool = Conn::new(DEFAULT_HOST);
-    may::go!(move || process_worker(default_pool));
-
     let socket = env::var("SOCKET_PATH").unwrap();
     let socket = std::path::Path::new(&socket);
-    Service.start_with_uds(socket).unwrap().join().unwrap();
+    let _ = fs::remove_file(socket);
+    let listener = UnixListener::bind(socket).unwrap();
+
+    let (tx_ch, rx_ch) = tokio::sync::mpsc::channel::<([u8; 36], [u8; 18])>(10000);
+    TX.set(tx_ch).unwrap();
+
+    tokio_uring::start(async {
+        tokio_uring::spawn(async move { process_worker(rx_ch).await });
+
+        println!("Server started");
+        loop {
+            let mut stream = unsafe { listener.accept().await.unwrap_unchecked() };
+            tokio_uring::spawn(async move { handle_stream(&mut stream).await });
+            // handle_stream(&mut stream).await // in some tests, not spawning a new thread was faster
+        }
+    });
 }
