@@ -26,11 +26,11 @@ services:
       - backend
     volumes:
       - sockets:/sockets:rw
-    # deploy:
-    #   resources:
-    #     limits:
-    #       memory: 50M
-    #       cpus: "0.3"
+    deploy:
+      resources:
+        limits:
+          memory: 50M
+          cpus: "0.3"
 
   backend1:
     build: .
