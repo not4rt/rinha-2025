@@ -136,7 +136,7 @@ async fn process_worker(mut rx: Receiver<([u8; 36], [u8; 18])>) {
                         break;
                     }
                     500 => {
-                        println!("Processor out!");
+                        cold_path();
                         tokio::time::sleep(Duration::from_millis(5000)).await;
                     }
                     _ => {
@@ -174,38 +174,28 @@ async fn handle_stream(stream: &mut UnixStream) {
                 // POST payment
                 stream.write(OK_RESPONSE).submit().await; // this did not returned any error on local tests, but probably will return error on official test
 
-                let len = length - 131;
-                let body: [u8; 100] = unsafe { std::mem::zeroed() };
-                unsafe {
-                    std::ptr::copy_nonoverlapping(
-                        buffer.as_ptr().add(131),
-                        body.as_ptr() as *mut u8,
-                        len,
-                    )
-                };
-
                 let correlation_id: [u8; 36] =
-                    unsafe { body[18..54].try_into().unwrap_unchecked() };
+                    unsafe { buffer[149..185].try_into().unwrap_unchecked() };
 
                 let amount: [u8; 18] = unsafe { std::mem::zeroed() };
                 unsafe {
                     std::ptr::copy_nonoverlapping(
                         buffer.as_ptr().add(196),
                         amount.as_ptr() as *mut u8,
-                        len - 66,
+                        length - 197,
                     )
                 };
 
                 unsafe { TX.get().unwrap_unchecked().send((correlation_id, amount)) }.await;
             }
             (Ok(0), _) => {
+                cold_path();
                 // keep-alive close
-                // cold_path();
                 break;
             }
             (Ok(_), buffer) if buffer[0] == b'G' => {
-                // GET Summary
                 cold_path();
+                // GET Summary
 
                 let (from, to) = if buffer[21] == b'?' {
                     let from_ms: [u8; 24] = buffer[27..51].try_into().unwrap();
@@ -218,6 +208,7 @@ async fn handle_stream(stream: &mut UnixStream) {
                         .unwrap();
                     (Some(from), Some(to))
                 } else {
+                    cold_path();
                     (None, None)
                 };
 
@@ -261,6 +252,7 @@ async fn handle_stream(stream: &mut UnixStream) {
                 stream.write(response.as_bytes().to_owned()).submit().await; // this did not returned any error on local tests, but will probably return error on official test
             }
             (Ok(_), buffer) if buffer[7] == b'u' => {
+                cold_path();
                 // POST /purge
                 if buffer[1] != b'p' {
                     let peer_conn: UnixStream =
@@ -272,11 +264,7 @@ async fn handle_stream(stream: &mut UnixStream) {
                 stream.write(OK_RESPONSE).submit().await;
                 STATS.reset();
             }
-            (Ok(_), _) => {
-                cold_path();
-                unreachable!();
-            }
-            (Err(_), _) => {
+            (_, _) => {
                 cold_path();
                 unreachable!();
             }
