@@ -117,7 +117,6 @@ async fn process_worker(mut rx: Receiver<([u8; 36], [u8; 18])>) {
                 r#"{{"correlationId":"{correlation_id}","amount":"{amount}","requestedAt":"{rfc3339_time}"}}"#
             );
             loop {
-                yield_now().await;
                 let rsp = http_client
                     .post(DEFAULT_URL)
                     .body(payload.clone())
@@ -125,6 +124,7 @@ async fn process_worker(mut rx: Receiver<([u8; 36], [u8; 18])>) {
                     .send()
                     .await;
                 if rsp.is_err() {
+                    yield_now().await;
                     continue;
                 }
 
@@ -192,7 +192,8 @@ async fn handle_stream(stream: &mut UnixStream) {
                     )
                 };
 
-                let correlation_id: [u8; 36] = body[18..54].try_into().unwrap();
+                let correlation_id: [u8; 36] =
+                    unsafe { body[18..54].try_into().unwrap_unchecked() };
 
                 let amount: [u8; 18] = unsafe { std::mem::zeroed() };
                 unsafe {
@@ -203,7 +204,7 @@ async fn handle_stream(stream: &mut UnixStream) {
                     )
                 };
 
-                TX.get().unwrap().send((correlation_id, amount)).await;
+                unsafe { TX.get().unwrap_unchecked().send((correlation_id, amount)) }.await;
             }
             (Ok(0), _) => {
                 // keep-alive close
@@ -219,19 +220,25 @@ async fn handle_stream(stream: &mut UnixStream) {
                 cold_path();
 
                 // println!("Ok GET_LENGTH");
-                let from_ms: [u8; 24] = buffer[27..51].try_into().unwrap();
-                let to_ms: [u8; 24] = buffer[55..79].try_into().unwrap();
+                let (from, to) = if buffer[21] == b'?' {
+                    let from_ms: [u8; 24] = buffer[27..51].try_into().unwrap();
+                    let to_ms: [u8; 24] = buffer[55..79].try_into().unwrap();
 
-                let from = chrono::DateTime::parse_from_rfc3339(str::from_utf8(&from_ms).unwrap())
-                    .unwrap();
-                let to =
-                    chrono::DateTime::parse_from_rfc3339(str::from_utf8(&to_ms).unwrap()).unwrap();
+                    let from =
+                        chrono::DateTime::parse_from_rfc3339(str::from_utf8(&from_ms).unwrap())
+                            .unwrap();
+                    let to = chrono::DateTime::parse_from_rfc3339(str::from_utf8(&to_ms).unwrap())
+                        .unwrap();
+                    (Some(from), Some(to))
+                } else {
+                    (None, None)
+                };
 
                 // println!("from_ms: {from} - to_ms: {to}");
                 let (dc, da, fc, fa) = if buffer[1] == b'p' {
                     //from peer
                     println!("summary request from peer");
-                    let (dc, da, fc, fa) = STATS.get_summary(Some(from), Some(to));
+                    let (dc, da, fc, fa) = STATS.get_summary(from, to);
 
                     let mut peer_rsp = [0u8; 32];
                     peer_rsp[0..8].copy_from_slice(&dc.to_le_bytes());
@@ -255,7 +262,7 @@ async fn handle_stream(stream: &mut UnixStream) {
                     let peer_fc = u64::from_le_bytes(buf[16..24].try_into().unwrap());
                     let peer_fa = u64::from_le_bytes(buf[24..32].try_into().unwrap());
 
-                    let (dc, da, fc, fa) = STATS.get_summary(Some(from), Some(to));
+                    let (dc, da, fc, fa) = STATS.get_summary(from, to);
                     (dc + peer_dc, da + peer_da, fc + peer_fc, fa + peer_fa)
                 };
                 let body = format!(
@@ -296,7 +303,6 @@ async fn handle_stream(stream: &mut UnixStream) {
                 // break;
             }
         };
-        yield_now().await
     }
 }
 
@@ -307,7 +313,7 @@ fn main() {
     let _ = fs::remove_file(socket);
     let listener = UnixListener::bind(socket).unwrap();
 
-    let (tx_ch, rx_ch) = tokio::sync::mpsc::channel::<([u8; 36], [u8; 18])>(10000);
+    let (tx_ch, rx_ch) = tokio::sync::mpsc::channel::<([u8; 36], [u8; 18])>(15000);
     TX.set(tx_ch).unwrap();
 
     tokio_uring::start(async {
