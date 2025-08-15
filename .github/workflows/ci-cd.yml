@@ -63,7 +63,7 @@ jobs:
           max_attempts=30
           attempt=1
           while [ $attempt -le $max_attempts ]; do
-            if curl -f -s http://localhost:9999/payments-summary > /dev/null 2>&1; then
+            if curl -X POST http://localhost:9999/purge > /dev/null 2>&1; then
               echo "Services are ready!"
               break
             fi
