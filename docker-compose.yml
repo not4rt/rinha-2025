@@ -12,7 +12,7 @@ services:
         bind *:80
         default_backend api_backend
       backend api_backend
-        balance roundrobin
+        balance static-rr
         server backend1 /sockets/may.sock.1
         server backend2 /sockets/may.sock.2' > /tmp/haproxy.cfg &&
       haproxy -f /tmp/haproxy.cfg"
