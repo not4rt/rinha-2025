@@ -1,0 +1,4 @@
+GET /payments-summary?from=2025-08-09T02:20:22.811Z&to=2025-08-09T02:21:32.811Z HTTP/1.1
+host: localhost:9999
+user-agent: Grafana k6/1.1.0
+content-type: application/json

@@ -8,8 +8,12 @@ services:
       defaults
         mode http
         option http-keep-alive
+        option srvtcpka
+        option clitcpka
+        option http-no-delay
+        http-reuse aggressive
       frontend api_frontend
-        bind *:80
+        bind *:80 alpn h2c
         default_backend api_backend
       backend api_backend
         balance static-rr
@@ -44,12 +48,16 @@ services:
     networks:
       - backend
       - payment-processor
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     extra_hosts:
       - "host.docker.internal:host-gateway"
     deploy:
       resources:
         limits:
-          memory: 40M
+          memory: 150M
           cpus: "0.6"
 
   backend2:
@@ -66,10 +74,14 @@ services:
       - payment-processor
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     deploy:
       resources:
         limits:
-          memory: 40M
+          memory: 150M
           cpus: "0.6"
 
 volumes:

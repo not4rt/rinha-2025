@@ -1,0 +1,7 @@
+POST /payments HTTP/1.1
+host: localhost:9999
+user-agent: Grafana k6/1.1.0
+content-length: 70
+content-type: application/json
+
+{"correlationId":"82b55fde-ac0a-4ea9-8865-5981b96949be","amount":19.9}

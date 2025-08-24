@@ -4,8 +4,9 @@ version = "4.1.0"
 edition = "2024"
 
 [dependencies]
-chrono = "0.4.41"
-dashmap = { version = "6.1.0", features = ["inline"] }
+log = { version = "*", features = ["max_level_off", "release_max_level_off"] }
+chrono = { version = "0.4.41", default-features = false, features = ["now"] }
+dashmap = { version = "6.1.0", default-features = false }
 mimalloc = { version = "0.1", default-features = false }
 reqwest = { version = "0.12.23", default-features = false }
 tokio = { version = "1.47.1", default-features = false }

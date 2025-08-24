@@ -1,0 +1,32 @@
+[package]
+name = "rust_coroutines_rinha_2025"
+version = "3.1.0"
+edition = "2024"
+
+[dependencies]
+mimalloc = { version = "0.1", default-features = false }
+
+may = { version = "0.3", default-features = false, features = ["io_timeout"] }
+may_minihttp = { git = "https://github.com/not4rt/may_minihttp", rev = "0b914d4", default-features = false }
+chrono = "0.4"
+dashmap = "6"
+itoa = "1.0"
+ureq = { git = "https://github.com/not4rt/ureq", default-features = false }
+bytes = "1.10.1"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+panic = 'abort'
+lto = 'fat'
+debug = false
+incremental = false
+overflow-checks = false
+strip = "debuginfo"
+
+[profile.release.build-override]
+opt-level = 3
+
+[profile.release.package."*"]
+opt-level = 3
+codegen-units = 1
