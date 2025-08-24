@@ -1,6 +1,6 @@
 services:
   haproxy:
-    image: haproxy:3.2.3-alpine
+    image: haproxy:latest
     command: >
       sh -c "
       echo 'global
@@ -41,48 +41,59 @@ services:
     environment:
       PEER1_SOCKET: /sockets/may.sock.2
       SOCKET_PATH: /sockets/may.sock.1
+      WORKER_SOCKET_PATH: /sockets/worker.sock
     security_opt: 
           - seccomp=unconfined  # io_ring support
     volumes:
       - sockets:/sockets:rw
     networks:
       - backend
-      - payment-processor
-    ulimits:
-      nofile:
-        soft: 65536
-        hard: 65536
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    depends_on:
+      - worker
     deploy:
       resources:
         limits:
-          memory: 150M
-          cpus: "0.6"
+          memory: 10M
+          cpus: "0.5"
 
   backend2:
     build: .
     environment:
       PEER1_SOCKET: /sockets/may.sock.1
       SOCKET_PATH: /sockets/may.sock.2
+      WORKER_SOCKET_PATH: /sockets/worker.sock
     volumes:
       - sockets:/sockets:rw
     security_opt: 
           - seccomp=unconfined  # io_ring support
     networks:
       - backend
-      - payment-processor
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
-    ulimits:
-      nofile:
-        soft: 65536
-        hard: 65536
+    depends_on:
+      - worker
     deploy:
       resources:
         limits:
-          memory: 150M
-          cpus: "0.6"
+          memory: 10M
+          cpus: "0.5"
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    environment:
+      WORKER_SOCKET_PATH: /sockets/worker.sock
+    security_opt: 
+          - seccomp=unconfined  # io_ring support
+    volumes:
+      - sockets:/sockets:rw
+    networks:
+      - backend
+      - payment-processor
+    deploy:
+      resources:
+        limits:
+          memory: 200M
+          cpus: "0.2"
 
 volumes:
   sockets:

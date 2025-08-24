@@ -9,10 +9,10 @@ RUN rm -rf src
 
 # Build application
 COPY src ./src
-RUN touch src/main.rs
-RUN RUSTFLAGS="-C target-cpu=skylake -C link-arg=-fuse-ld=lld -Z share-generics=y" cargo +nightly build --release --bin backend
+RUN touch src/worker.rs
+RUN RUSTFLAGS="-C target-cpu=skylake -C link-arg=-fuse-ld=lld -Z share-generics=y" cargo +nightly build --release --bin worker
 
 FROM gcr.io/distroless/cc-debian12
 WORKDIR /app
-COPY --from=builder /app/target/release/backend /app/
-CMD ["./backend"]
+COPY --from=builder /app/target/release/worker /app/
+CMD ["./worker"]

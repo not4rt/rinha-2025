@@ -7,6 +7,12 @@ pub struct Stats {
     pub fallback_records: DashMap<DateTime<Utc>, u64>,
 }
 
+impl Default for Stats {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Stats {
     pub fn new() -> Self {
         Self {
@@ -88,5 +94,6 @@ impl Stats {
     #[inline]
     pub fn reset(&self) {
         self.default_records.clear();
+        self.fallback_records.clear();
     }
 }

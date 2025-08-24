@@ -1,8 +1,14 @@
 use chrono::Utc;
 use std::{hint::cold_path, time::Duration};
-use tokio::{sync::mpsc::Receiver, task::yield_now, time::Instant};
+use tokio::sync::{
+    OnceCell,
+    mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
+};
+use tokio::time::Instant;
 
 use crate::{DEFAULT_URL, FALLBACK_URL, STATS};
+
+pub static PAYMENT_SENDER: OnceCell<UnboundedSender<[u8; 85]>> = OnceCell::const_new();
 
 #[inline]
 pub async fn choose_processor(
@@ -25,8 +31,14 @@ pub async fn choose_processor(
     DEFAULT_URL
 }
 
+pub async fn start_processor() {
+    let (tx, rx) = unbounded_channel::<[u8; 85]>();
+    PAYMENT_SENDER.set(tx).unwrap();
+    process_worker(rx).await;
+}
+
 #[inline]
-pub async fn process_worker(mut rx: Receiver<[u8; 100]>) {
+async fn process_worker(mut rx: UnboundedReceiver<[u8; 85]>) {
     let http_client = reqwest::ClientBuilder::new()
         .timeout(Duration::from_millis(500))
         .tcp_keepalive(Duration::from_secs(300))
@@ -39,7 +51,6 @@ pub async fn process_worker(mut rx: Receiver<[u8; 100]>) {
 
     loop {
         while let Some(body) = rx.recv().await {
-            yield_now().await;
             // find the first zero byte in body
             let body_len = body.iter().position(|&b| b == 0).unwrap();
 
@@ -68,10 +79,11 @@ pub async fn process_worker(mut rx: Receiver<[u8; 100]>) {
                     .header(reqwest::header::CONTENT_TYPE, "application/json")
                     .send()
                     .await;
+
                 if rsp.is_err() {
                     // timeout
                     timeout_count += 1;
-                    if timeout_count > 5 {
+                    if timeout_count > 15 {
                         if url == DEFAULT_URL {
                             default_ignore_until = Instant::now() + Duration::from_millis(1750);
                             timeout_count = 0;
@@ -80,7 +92,6 @@ pub async fn process_worker(mut rx: Receiver<[u8; 100]>) {
                             timeout_count = 0;
                         }
                     }
-                    yield_now().await;
                     continue;
                 }
                 timeout_count = 0;
@@ -103,7 +114,6 @@ pub async fn process_worker(mut rx: Receiver<[u8; 100]>) {
                                 .unwrap()
                                 .record_fallback(now, parse_amount_cents(&amount));
                         }
-                        // println!(\"Processed payment 200!\");
                         break;
                     }
                     422 => {
@@ -118,19 +128,14 @@ pub async fn process_worker(mut rx: Receiver<[u8; 100]>) {
                                 .unwrap()
                                 .record_fallback(now, parse_amount_cents(&amount));
                         }
-                        // println!(\"Processed payment 422!\");
                         break;
                     }
                     500 => {
-                        cold_path();
-                        // println!(\"Error 500!\");
                         if url == DEFAULT_URL {
                             default_ignore_until = Instant::now() + Duration::from_millis(1750);
                         } else {
                             fallback_ignore_until = Instant::now() + Duration::from_millis(1750);
                         }
-                        yield_now().await;
-                        // tokio::time::sleep(Duration::from_millis(2500)).await;
                     }
                     _ => {
                         cold_path();
@@ -157,42 +162,3 @@ pub fn parse_amount_cents(amount_str: &str) -> u64 {
         None => amount_str.parse::<u64>().unwrap_or(0) * 100,
     }
 }
-
-// #[inline(always)]
-// pub fn parse_amount_cents_bytes(amount_bytes: &[u8]) -> u64 {
-//     // Helper function to parse u64 from ASCII digit bytes
-//     // Returns 0 if ANY byte is not a digit (matches unwrap_or(0) behavior)
-//     fn parse_digits_from_bytes(bytes: &[u8]) -> u64 {
-//         // First check if all bytes are digits
-//         if bytes.is_empty() || !bytes.iter().all(|&b| b.is_ascii_digit()) {
-//             return 0;
-//         }
-
-//         // Now parse by converting ASCII digits to numbers
-//         let mut result = 0u64;
-//         for &byte in bytes {
-//             result = result * 10 + (byte - b'0') as u64;
-//         }
-//         result
-//     }
-
-//     // Find the decimal point (ASCII 46)
-//     if let Some(dot_pos) = amount_bytes.iter().position(|&b| b == b'.') {
-//         // Split into whole and decimal parts
-//         let whole_bytes = &amount_bytes[..dot_pos];
-//         let decimal_bytes = &amount_bytes[dot_pos + 1..];
-
-//         let whole_cents = parse_digits_from_bytes(whole_bytes) * 100;
-
-//         let decimal_cents = match decimal_bytes.len() {
-//             0 => 0,
-//             1 => parse_digits_from_bytes(decimal_bytes) * 10,
-//             _ => parse_digits_from_bytes(&decimal_bytes[..2]),
-//         };
-
-//         whole_cents + decimal_cents
-//     } else {
-//         // No decimal point, treat as whole number
-//         parse_digits_from_bytes(amount_bytes) * 100
-//     }
-// }
