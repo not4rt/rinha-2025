@@ -1,11 +1,11 @@
 {
   "participante": "anonymous",
-  "total_liquido": 331494.2199,
-  "total_bruto": 302659.1,
-  "total_taxas": 21731.795,
+  "total_liquido": 331434.3408,
+  "total_bruto": 302679,
+  "total_taxas": 21802.44,
   "descricao": "'total_liquido' é sua pontuação final. Equivale ao seu lucro. Fórmula: total_liquido + (total_liquido * p99.bonus) - (total_liquido * multa.porcentagem)",
   "p99": {
-    "valor": "2.09ms",
+    "valor": "2.04ms",
     "bonus": "18%",
     "max_requests": 500,
     "descricao": "Fórmula para o bônus: max((11 - p99.valor) * 0.02, 0)"
@@ -23,26 +23,26 @@
     "descricao": "Se 'lag' for negativo, significa que seu backend registrou mais pagamentos do que solicitado, automaticamente desclassificando sua submissão!"
   },
   "lag": {
-    "num_pagamentos_total": 15209,
-    "num_pagamentos_solicitados": 15209,
+    "num_pagamentos_total": 15210,
+    "num_pagamentos_solicitados": 15210,
     "lag": 0,
     "descricao": "Lag é a diferença entre a quantidade de solicitações de pagamentos e o que foi realmente computado pelo backend. Mostra a perda de pagamentos possivelmente por estarem enfileirados."
   },
   "pagamentos_solicitados": {
-    "qtd_sucesso": 15209,
+    "qtd_sucesso": 15210,
     "qtd_falha": 0,
     "descricao": "'qtd_sucesso' foram requests bem sucedidos para 'POST /payments' e 'qtd_falha' os requests com erro."
   },
   "pagamentos_realizados_default": {
-    "total_bruto": 236670.7,
-    "num_pagamentos": 11893,
-    "total_taxas": 11833.535,
+    "total_bruto": 235994.1,
+    "num_pagamentos": 11859,
+    "total_taxas": 11799.705,
     "descricao": "Informações do backend sobre solicitações de pagamento para o Payment Processor Default."
   },
   "pagamentos_realizados_fallback": {
-    "total_bruto": 65988.4,
-    "num_pagamentos": 3316,
-    "total_taxas": 9898.26,
+    "total_bruto": 66684.9,
+    "num_pagamentos": 3351,
+    "total_taxas": 10002.735,
     "descricao": "Informações do backend sobre solicitações de pagamento para o Payment Processor Fallback."
   }
 }
