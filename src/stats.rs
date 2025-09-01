@@ -1,5 +1,6 @@
 use chrono::{DateTime, FixedOffset, Utc};
 use dashmap::DashMap;
+use std::hint::cold_path;
 
 #[derive(Debug)]
 pub struct Stats {
@@ -16,8 +17,8 @@ impl Default for Stats {
 impl Stats {
     pub fn new() -> Self {
         Self {
-            default_records: DashMap::with_capacity(1_000_000),
-            fallback_records: DashMap::with_capacity(1_000_000),
+            default_records: DashMap::with_capacity(50_000),
+            fallback_records: DashMap::with_capacity(50_000),
         }
     }
 
@@ -56,36 +57,35 @@ impl Stats {
         let mut fc = 0u64;
         let mut fa = 0u64;
 
-        for default_record in self.default_records.iter() {
-            if let Some(from) = from_ms
-                && default_record.key() < &from
-            {
-                continue;
-            }
-            if let Some(to) = to_ms
-                && default_record.key() > &to
-            {
-                continue;
+        if let (Some(from), Some(to)) = (from_ms, to_ms) {
+            for entry in &self.default_records {
+                let key = entry.key();
+                if key >= &from && key <= &to {
+                    dc += 1;
+                    da += *entry.value();
+                }
             }
 
-            dc += 1;
-            da += *default_record;
-        }
-
-        for fallback_record in self.fallback_records.iter() {
-            if let Some(from) = from_ms
-                && fallback_record.key() < &from
-            {
-                continue;
+            for entry in &self.fallback_records {
+                let key = entry.key();
+                if key >= &from && key <= &to {
+                    fc += 1;
+                    fa += *entry.value();
+                }
             }
-            if let Some(to) = to_ms
-                && fallback_record.key() > &to
-            {
-                continue;
+        } else {
+            // get all records
+            cold_path();
+
+            for entry in &self.default_records {
+                dc += 1;
+                da += *entry.value();
             }
 
-            fc += 1;
-            fa += *fallback_record;
+            for entry in &self.fallback_records {
+                fc += 1;
+                fa += *entry.value();
+            }
         }
 
         (dc, da, fc, fa)
@@ -93,6 +93,7 @@ impl Stats {
 
     #[inline]
     pub fn reset(&self) {
+        cold_path();
         self.default_records.clear();
         self.fallback_records.clear();
     }

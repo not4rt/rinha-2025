@@ -26,6 +26,15 @@ services:
     depends_on:
       - backend1
       - backend2
+    cap_add:
+      - IPC_LOCK
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 9999999
+        hard: 9999999
     networks:
       - backend
     volumes:
@@ -39,61 +48,81 @@ services:
   backend1:
     build: .
     environment:
-      PEER1_SOCKET: /sockets/may.sock.2
       SOCKET_PATH: /sockets/may.sock.1
-      WORKER_SOCKET_PATH: /sockets/worker.sock
-    security_opt: 
-          - seccomp=unconfined  # io_ring support
-    volumes:
-      - sockets:/sockets:rw
-    networks:
-      - backend
-    depends_on:
-      - worker
-    deploy:
-      resources:
-        limits:
-          memory: 10M
-          cpus: "0.5"
-
-  backend2:
-    build: .
-    environment:
-      PEER1_SOCKET: /sockets/may.sock.1
-      SOCKET_PATH: /sockets/may.sock.2
-      WORKER_SOCKET_PATH: /sockets/worker.sock
-    volumes:
-      - sockets:/sockets:rw
-    security_opt: 
-          - seccomp=unconfined  # io_ring support
-    networks:
-      - backend
-    depends_on:
-      - worker
-    deploy:
-      resources:
-        limits:
-          memory: 10M
-          cpus: "0.5"
-
-  worker:
-    build:
-      context: .
-      dockerfile: Dockerfile.worker
-    environment:
-      WORKER_SOCKET_PATH: /sockets/worker.sock
-    security_opt: 
-          - seccomp=unconfined  # io_ring support
+      PEER_SOCKET_PATH: /sockets/may.sock.2
+      # WORKER_SOCKET_PATH: /sockets/worker.sock
+    security_opt:
+      - seccomp=unconfined # io_ring support
     volumes:
       - sockets:/sockets:rw
     networks:
       - backend
       - payment-processor
+    # depends_on:
+    #   - worker
+    cap_add:
+      - IPC_LOCK
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 9999999
+        hard: 9999999
     deploy:
       resources:
         limits:
-          memory: 200M
-          cpus: "0.2"
+          memory: 30M
+          cpus: "0.6"
+
+  backend2:
+    build: .
+    environment:
+      SOCKET_PATH: /sockets/may.sock.2
+      PEER_SOCKET_PATH: /sockets/may.sock.1
+      # WORKER_SOCKET_PATH: /sockets/worker.sock
+    volumes:
+      - sockets:/sockets:rw
+    security_opt:
+      - seccomp=unconfined # io_ring support
+    networks:
+      - backend
+      - payment-processor
+    # depends_on:
+    #   - worker
+    cap_add:
+      - IPC_LOCK
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 9999999
+        hard: 9999999
+    deploy:
+      resources:
+        limits:
+          memory: 30M
+          cpus: "0.6"
+
+  # worker:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile.worker
+  #   environment:
+  #     WORKER_SOCKET_PATH: /sockets/worker.sock
+  #   security_opt:
+  #         - seccomp=unconfined  # io_ring support
+  #   volumes:
+  #     - sockets:/sockets:rw
+  #   networks:
+  #     - backend
+  #     - payment-processor
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         memory: 30M
+  #         cpus: "0.6"
 
 volumes:
   sockets:

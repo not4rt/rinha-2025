@@ -1,5 +1,5 @@
 [package]
-name = "rust_coroutines_rinha_2025"
+name = "rust_monoio_rinha_2025"
 version = "4.1.0"
 edition = "2024"
 
@@ -7,10 +7,14 @@ edition = "2024"
 log = { version = "*", features = ["max_level_off", "release_max_level_off"] }
 chrono = { version = "0.4.41", default-features = false, features = ["now"] }
 dashmap = { version = "6.1.0", default-features = false }
-mimalloc = { version = "0.1", default-features = false }
+# mimalloc = { version = "0.1", default-features = false }
 
-monoio = {git = "https://github.com/bytedance/monoio", features = ["zero-copy"]}
+monoio = { git = "https://github.com/bytedance/monoio", branch = "master", features = [
+    "zero-copy",
+    "splice",
+] }
 futures = "0.3.31"
+memchr = "2.7.5"
 
 [[bin]]
 name = "backend"
