@@ -112,6 +112,11 @@ impl ProcessorHealth {
                 );
             }
         }
+        // else {
+        //     println!(
+        //         "[HealthChecker] No change in best processor (default_failing={default_failing}, default_time={default_time}ms, fallback_failing={fallback_failing}, fallback_time={fallback_time}ms)"
+        //     );
+        // }
     }
 }
 

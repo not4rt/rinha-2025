@@ -22,7 +22,7 @@ use std::hint::cold_path;
 use std::sync::LazyLock;
 use std::{env, fs};
 
-use crate::payment_processor::get_next_sender;
+use crate::payment_processor::PAYMENT_SENDER;
 use crate::stats::Stats;
 
 const REQUEST_BUFFER_SIZE: usize = 202;
@@ -62,9 +62,13 @@ async fn main() {
 #[inline(always)]
 pub async fn handle_stream(stream: &mut UnixStream) {
     // let mut worker_stream = UnixStream::connect(WORKER_SOCKET.as_str()).await.unwrap();
+    let mut buffer: Vec<u8> = Vec::with_capacity(REQUEST_BUFFER_SIZE);
+    let mut result;
+    let mut payment_array = [0u8; PAYMENT_BODY_SIZE];
+    let sender = PAYMENT_SENDER.get().unwrap();
 
     loop {
-        let (result, buffer) = stream.read(vec![0u8; REQUEST_BUFFER_SIZE]).await;
+        (result, buffer) = stream.read(buffer).await;
 
         let len = unsafe { result.unwrap_unchecked() };
 
@@ -86,13 +90,12 @@ pub async fn handle_stream(stream: &mut UnixStream) {
                 // let _ = worker_stream
                 //     .write_all(buffer.slice(PAYMENT_BODY_OFFSET..))
                 //     .await;
-                let json_end = memchr::memchr(b'}', &buffer).unwrap() + 1;
+                // let json_end = memchr::memchr(b'}', &buffer).unwrap() + 1;
 
-                let mut payment_array = [0u8; PAYMENT_BODY_SIZE];
-                payment_array[..json_end - PAYMENT_BODY_OFFSET]
-                    .copy_from_slice(&buffer[PAYMENT_BODY_OFFSET..json_end]);
+                payment_array[..len - PAYMENT_BODY_OFFSET]
+                    .copy_from_slice(&buffer[PAYMENT_BODY_OFFSET..]);
 
-                let sender = get_next_sender();
+                // let sender = get_next_sender();
 
                 let _ = sender.unbounded_send(payment_array);
             }
@@ -195,5 +198,7 @@ pub async fn handle_stream(stream: &mut UnixStream) {
                 unreachable!();
             }
         }
+
+        buffer.clear();
     }
 }

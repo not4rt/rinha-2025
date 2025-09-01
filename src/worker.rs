@@ -13,7 +13,9 @@ use monoio::{
 use stats::Stats;
 use std::{env, fs, hint::cold_path, str, sync::LazyLock};
 
-use crate::payment_processor::get_next_sender;
+use crate::payment_processor::PAYMENT_SENDER;
+
+// use crate::payment_processor::get_next_sender;
 
 const MAX_BUFFER_SIZE: usize = 150;
 const PAYMENT_BODY_SIZE: usize = 85;
@@ -48,6 +50,7 @@ async fn main() {
 
 #[inline(always)]
 async fn handle_payment_stream(stream: &mut UnixStream) {
+    let sender = PAYMENT_SENDER.get().unwrap();
     loop {
         let (result, buffer) = stream.read(vec![0u8; MAX_BUFFER_SIZE]).await;
         let len = unsafe { result.unwrap_unchecked() };
@@ -68,7 +71,7 @@ async fn handle_payment_stream(stream: &mut UnixStream) {
                 let mut payment_array = [0u8; PAYMENT_BODY_SIZE];
                 payment_array[..json_end].copy_from_slice(&buffer[..json_end]);
 
-                let sender = get_next_sender();
+                // let sender = get_next_sender();
 
                 let _ = sender.unbounded_send(payment_array);
             }

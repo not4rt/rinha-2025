@@ -5,7 +5,7 @@ use monoio::io::{AsyncReadRent, AsyncWriteRentExt};
 use monoio::net::TcpStream;
 // use monoio::time::sleep;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::Ordering;
 use std::{hint::cold_path, time::Duration};
 
 use crate::health_checker::{PROCESSOR_HEALTH, start_health_checker};
@@ -15,16 +15,17 @@ use crate::{DEFAULT_ADDRESS, FALLBACK_ADDRESS, STATS};
 const PAYMENT_BODY_SIZE: usize = 85;
 const RESPONSE_BUFFER_SIZE: usize = 2600;
 const KEEP_ALIVE_SECS: u64 = 300;
-const PAYMENT_PROCESSORS: usize = 2;
+const PAYMENT_PROCESSORS: usize = 1;
 
-const POST_HEADER: &str = "POST /payments HTTP/1.1\r\nContent-Length: ";
-const HEADERS: &str = "\r\nhost: payment-processor\r\ncontent-type: application/json\r\nConnection: keep-alive\r\nKeep-Alive: timeout=300, max=1000\r\n\r\n";
+const POST_HEADER: &[u8] = b"POST /payments HTTP/1.1\r\nContent-Length: ";
+const HEADERS: &[u8] = b"\r\nhost: payment-processor\r\ncontent-type: application/json\r\nConnection: keep-alive\r\nKeep-Alive: timeout=300, max=1000\r\n\r\n";
 const REQUESTED_AT_PREFIX: &[u8] = b",\"requestedAt\":\"";
 
 // payment distribution
-static PROCESSOR_COUNTER: AtomicUsize = AtomicUsize::new(0);
-pub static PAYMENT_SENDERS: OnceLock<Vec<UnboundedSender<[u8; PAYMENT_BODY_SIZE]>>> =
-    OnceLock::new();
+// static PROCESSOR_COUNTER: AtomicUsize = AtomicUsize::new(0);
+// pub static PAYMENT_SENDERS: OnceLock<Vec<UnboundedSender<[u8; PAYMENT_BODY_SIZE]>>> =
+//     OnceLock::new();
+pub static PAYMENT_SENDER: OnceLock<UnboundedSender<[u8; PAYMENT_BODY_SIZE]>> = OnceLock::new();
 
 #[inline]
 async fn create_connection(address: &str) -> TcpStream {
@@ -48,29 +49,34 @@ pub async fn start_processor() {
         start_health_checker().await;
     });
 
-    let mut senders = Vec::with_capacity(PAYMENT_PROCESSORS);
+    // let mut senders = Vec::with_capacity(PAYMENT_PROCESSORS);
 
     println!("Starting {PAYMENT_PROCESSORS} payment processor workers");
 
-    // a channel for each processor task
-    for processor_id in 0..PAYMENT_PROCESSORS {
-        let (tx, rx) = unbounded::<[u8; PAYMENT_BODY_SIZE]>();
-        senders.push(tx);
+    // // a channel for each processor task
+    // for processor_id in 0..PAYMENT_PROCESSORS {
+    //     let (tx, rx) = unbounded::<[u8; PAYMENT_BODY_SIZE]>();
+    //     senders.push(tx);
 
-        monoio::spawn(async move {
-            process_worker(processor_id, rx).await;
-        });
-    }
+    //     monoio::spawn(async move {
+    //         process_worker(processor_id, rx).await;
+    //     });
+    // }
+    // PAYMENT_SENDERS.set(senders).unwrap();
 
-    PAYMENT_SENDERS.set(senders).unwrap();
+    let (tx, rx) = unbounded::<[u8; PAYMENT_BODY_SIZE]>();
+    PAYMENT_SENDER.set(tx).unwrap();
+    monoio::spawn(async move {
+        process_worker(0, rx).await;
+    });
 }
 
-#[inline(always)]
-pub fn get_next_sender() -> &'static UnboundedSender<[u8; PAYMENT_BODY_SIZE]> {
-    let senders = PAYMENT_SENDERS.get().unwrap();
-    let index = PROCESSOR_COUNTER.fetch_add(1, Ordering::Relaxed) % PAYMENT_PROCESSORS;
-    &senders[index]
-}
+// #[inline(always)]
+// pub fn get_next_sender() -> &'static UnboundedSender<[u8; PAYMENT_BODY_SIZE]> {
+//     let senders = PAYMENT_SENDERS.get().unwrap();
+//     let index = PROCESSOR_COUNTER.fetch_add(1, Ordering::Relaxed) % PAYMENT_PROCESSORS;
+//     &senders[index]
+// }
 
 #[inline]
 async fn process_worker(processor_id: usize, mut rx: UnboundedReceiver<[u8; PAYMENT_BODY_SIZE]>) {
@@ -79,7 +85,8 @@ async fn process_worker(processor_id: usize, mut rx: UnboundedReceiver<[u8; PAYM
     let mut default_conn = create_connection(DEFAULT_ADDRESS).await;
     let mut fallback_conn = create_connection(FALLBACK_ADDRESS).await;
 
-    let mut request_buffer = String::with_capacity(512);
+    let mut payload = Vec::with_capacity(128);
+    let mut request_buffer = Vec::with_capacity(512);
 
     let mut fail_count: u8 = 0;
 
@@ -91,19 +98,17 @@ async fn process_worker(processor_id: usize, mut rx: UnboundedReceiver<[u8; PAYM
         let now = Utc::now();
         let requested_at = now.to_rfc3339();
 
-        let mut payload = Vec::with_capacity(json_end + 50);
+        payload.clear();
         payload.extend_from_slice(&body[..json_end]);
         payload.extend_from_slice(REQUESTED_AT_PREFIX);
         payload.extend_from_slice(requested_at.as_bytes());
         payload.extend_from_slice(b"\"}");
 
         request_buffer.clear();
-        request_buffer.push_str(POST_HEADER);
-        request_buffer.push_str(&payload.len().to_string());
-        request_buffer.push_str(HEADERS);
-        request_buffer.push_str(&String::from_utf8_lossy(&payload));
-
-        let request_bytes = request_buffer.as_bytes().to_owned();
+        request_buffer.extend_from_slice(POST_HEADER);
+        request_buffer.extend_from_slice(&payload.len().to_string().as_bytes());
+        request_buffer.extend_from_slice(HEADERS);
+        request_buffer.extend_from_slice(&payload);
 
         loop {
             let url = PROCESSOR_HEALTH
@@ -111,10 +116,10 @@ async fn process_worker(processor_id: usize, mut rx: UnboundedReceiver<[u8; PAYM
                 .load(Ordering::Relaxed);
 
             let (result, buffer) = if url == 0 {
-                let _ = default_conn.write_all(request_bytes.clone()).await;
+                let _ = default_conn.write_all(request_buffer.clone()).await;
                 default_conn.read(vec![0u8; RESPONSE_BUFFER_SIZE]).await
             } else {
-                let _ = fallback_conn.write_all(request_bytes.clone()).await;
+                let _ = fallback_conn.write_all(request_buffer.clone()).await;
                 fallback_conn.read(vec![0u8; RESPONSE_BUFFER_SIZE]).await
             };
 
