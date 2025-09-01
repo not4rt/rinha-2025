@@ -97,8 +97,8 @@ services:
         soft: -1
         hard: -1
       nofile:
-        soft: 9999999
-        hard: 9999999
+        soft: 65536
+        hard: 65536
     deploy:
       resources:
         limits:
