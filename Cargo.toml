@@ -12,6 +12,7 @@ dashmap = { version = "6.1.0", default-features = false }
 monoio = { git = "https://github.com/bytedance/monoio", branch = "master", features = [
     "zero-copy",
     "splice",
+    "iouring",
 ] }
 futures = "0.3.31"
 memchr = "2.7.5"

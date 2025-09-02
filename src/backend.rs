@@ -52,20 +52,17 @@ async fn main() {
     println!("Server started");
     loop {
         let (stream, _) = unsafe { listener.accept().await.unwrap_unchecked() };
-        monoio::spawn(async move {
-            let mut stream = stream;
-            handle_stream(&mut stream).await;
-        });
+        monoio::spawn(handle_stream(stream));
     }
 }
 
 #[inline(always)]
-pub async fn handle_stream(stream: &mut UnixStream) {
+pub async fn handle_stream(mut stream: UnixStream) {
     // let mut worker_stream = UnixStream::connect(WORKER_SOCKET.as_str()).await.unwrap();
     let mut buffer: Vec<u8> = Vec::with_capacity(REQUEST_BUFFER_SIZE);
     let mut result;
     let mut payment_array = [0u8; PAYMENT_BODY_SIZE];
-    let sender = PAYMENT_SENDER.get().unwrap();
+    let sender = unsafe { PAYMENT_SENDER.get().unwrap_unchecked() };
 
     loop {
         (result, buffer) = stream.read(buffer).await;
